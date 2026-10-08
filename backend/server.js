@@ -1,23 +1,1312 @@
-'use strict';
-const express=require('express'); const cors=require('cors');
-const app=express(); const PORT=process.env.PORT||10000; const VERSION='V1.0';
-app.use(cors()); app.use(express.json());
-const RAW_ROUNDS=[1.64,1.34,1.01,7.39,1.24,3.91,1.07,1.05,2.20,1.09,1.36,1.38,12.40,14.02,1.07,1.81,1.84,2.29,1.71,1.00,5.75,2.31,1.01,1.06,9.70,238.30,1.29,1.18,15.16,1.13,1.06,2.14,2.00,1.07,1.28,1.36,1.31,10.64,1.14,5.44,30.64,7.88,1.01,1.82,1.54,28.07,1.28,2.22,1.11,4.01,1.72,1.00,1.04,2.42,3.32,4.45,10.53,3.81];
-const ROUNDS=RAW_ROUNDS.map((multiplier,i)=>({roundId:i+1,multiplier,timestamp:null,source:'initial-dataset'}));
-const CFG={minHistory:20,target:2,lookback:12,threshold:68,minBacktest:12};
-const avg=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:0;
-function median(a){if(!a.length)return 0;const x=[...a].sort((a,b)=>a-b),m=Math.floor(x.length/2);return x.length%2?x[m]:(x[m-1]+x[m])/2}
-const clamp=(n,a,b)=>Math.max(a,Math.min(b,n)); const pct=n=>+(n*100).toFixed(2);
-function streak(a,p){let n=0;for(let i=a.length-1;i>=0&&p(a[i]);i--)n++;return n}
-function longest(a,p){let best=0,n=0;for(const x of a){n=p(x)?n+1:0;best=Math.max(best,n)}return best}
-function summary(a){const c=x=>a.filter(x).length;return{samples:a.length,min:+Math.min(...a).toFixed(2),max:+Math.max(...a).toFixed(2),mean:+avg(a).toFixed(2),median:+median(a).toFixed(2),rates:{below1_2:pct(c(v=>v<1.2)/a.length),below1_5:pct(c(v=>v<1.5)/a.length),atLeast2:pct(c(v=>v>=2)/a.length),atLeast3:pct(c(v=>v>=3)/a.length),atLeast5:pct(c(v=>v>=5)/a.length),atLeast10:pct(c(v=>v>=10)/a.length)},longestStreaks:{below1_2:longest(a,v=>v<1.2),below1_5:longest(a,v=>v<1.5),atLeast2:longest(a,v=>v>=2)}}}
-function features(a){const r=a.slice(-CFG.lookback),last=a.at(-1),prev=a.at(-2);return{sampleSize:a.length,lastMultiplier:+last.toFixed(2),previousMultiplier:prev==null?null:+prev.toFixed(2),recentWindow:r.length,recentMean:+avg(r).toFixed(2),recentMedian:+median(r).toFixed(2),recentRates:{below1_2:pct(r.filter(v=>v<1.2).length/r.length),below1_5:pct(r.filter(v=>v<1.5).length/r.length),atLeast2:pct(r.filter(v=>v>=2).length/r.length),atLeast3:pct(r.filter(v=>v>=3).length/r.length),atLeast5:pct(r.filter(v=>v>=5).length/r.length)},lowStreak:streak(r,v=>v<1.5),veryLowStreak:streak(r,v=>v<1.2)}}
-function rawScore(f){let s=50;if(f.recentRates.atLeast2>=33)s+=8;else if(f.recentRates.atLeast2<=16)s-=6;if(f.veryLowStreak>=3)s+=7;if(f.lowStreak>=4)s+=5;if(f.lastMultiplier>=3)s-=5;if(f.lastMultiplier<1.2)s+=4;return clamp(Math.round(s),0,100)}
-function backtest(){const rows=[];for(let i=CFG.minHistory;i<ROUNDS.length;i++){const h=ROUNDS.slice(0,i).map(r=>r.multiplier),f=features(h),s=rawScore(f);if(s>=CFG.threshold)rows.push({targetRound:i+1,score:s,actualMultiplier:ROUNDS[i].multiplier,hit:ROUNDS[i].multiplier>=CFG.target})}const hits=rows.filter(x=>x.hit).length,misses=rows.length-hits;return{targetMultiplier:CFG.target,samples:rows.length,hits,misses,hitRate:rows.length?+(hits/rows.length*100).toFixed(2):0,coverage:+(rows.length/(ROUNDS.length-CFG.minHistory)*100).toFixed(2),rows:rows.slice(-20)}}
-function analysis(){const a=RAW_ROUNDS,f=features(a),bt=backtest();let score=rawScore(f),reasons=[];if(f.recentRates.atLeast2>=33)reasons.push('Recent >=2x rate is relatively strong.');else if(f.recentRates.atLeast2<=16)reasons.push('Recent >=2x rate is weak.');if(f.veryLowStreak>=3){score+=7;reasons.push('A very-low streak is present.')}if(f.lowStreak>=4){score+=5;reasons.push('A low-multiplier streak is present.')}if(f.lastMultiplier>=3){score-=5;reasons.push('Latest round was elevated; model avoids chasing immediately.')}if(f.lastMultiplier<1.2){score+=4;reasons.push('Latest round was very low.')}if(bt.samples>=CFG.minBacktest){if(bt.hitRate>=50){score+=10;reasons.push('Walk-forward backtest is above 50% on qualifying samples.')}else if(bt.hitRate<40){score-=10;reasons.push('Walk-forward backtest is below 40% on qualifying samples.')}}score=clamp(Math.round(score),0,100);const action=score>=CFG.threshold&&bt.samples>=CFG.minBacktest?'ENTER':'WAIT';return{ok:true,version:VERSION,analyzedAt:new Date().toISOString(),previousRound:ROUNDS.at(-2),latestRound:ROUNDS.at(-1),nextRound:{roundId:ROUNDS.length+1,multiplier:null,timestamp:null,source:'awaiting-live-round'},analysis:{dataset:'58-round initial dataset',summary:summary(a),recent:{lookback:CFG.lookback,rounds:ROUNDS.slice(-CFG.lookback),features:f}},signal:{action,confidence:clamp(Math.round(40+Math.abs(score-50)*.85),40,82),score,targetMultiplier:CFG.target,risk:action==='ENTER'?'HIGH':'LOW',reasons},entry:{entryRound:ROUNDS.length+1,entryTime:null,countdownSeconds:null,rule:'Wait for the next round; V1.0 has no live round clock.'},model:{name:'Aviator V1 Evidence Model',architecture:['collect','analyze','backtest','score','signal'],target:'next round >= 2.00x',minimumHistory:CFG.minHistory,backtest:bt,disclaimer:'Historical patterns do not guarantee the next multiplier.'}}}
-app.get('/',(_,res)=>res.json({ok:true,name:'AVIATOR AI PREDICTOR',version:VERSION,message:'Use /api/analyze, /api/history, /api/status or /api/backtest.'}));
-app.get('/api/status',(_,res)=>res.json({ok:true,version:VERSION,source:'initial-dataset',dataset:{rounds:ROUNDS.length,firstRound:ROUNDS[0],lastRound:ROUNDS.at(-1)},architecture:['collect','analyze','backtest','score','signal'],liveFeed:false,ready:true}));
-app.get('/api/history',(_,res)=>res.json({ok:true,version:VERSION,rounds:ROUNDS,total:ROUNDS.length,source:'initial-dataset'}));
-app.get('/api/analyze',(_,res)=>res.json(analysis()));
-app.get('/api/backtest',(_,res)=>{const x=analysis();res.json({...x,signal:{action:'BACKTEST ONLY',confidence:0,score:null,targetMultiplier:CFG.target,risk:'N/A',reasons:['Historical walk-forward results only.']}})});
-app.listen(PORT,()=>console.log(`AVIATOR AI PREDICTOR ${VERSION} listening on ${PORT}`));
+// ============================================================
+// AVIATOR AI PREDICTOR
+// Backend V1.1.1
+// RESEARCH ONLY
+//
+// Architecture:
+// CSV -> VALIDATE -> FEATURES -> BACKTEST -> SCORE -> SIGNAL
+//
+// IMPORTANT:
+// This system does NOT claim to know the next Aviator round.
+// The score is an evidence index, not a probability.
+// ============================================================
+
+const express = require("express");
+const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+const PORT = process.env.PORT || 10000;
+const VERSION = "V1.1.1";
+
+const CONFIG = {
+  target: 2.0,
+
+  shortWindow: 6,
+  mediumWindow: 12,
+  longWindow: 24,
+
+  minHistory: 24,
+  minBacktestSamples: 12,
+
+  signalThreshold: 68,
+  strongThreshold: 78,
+
+  stableHitRate: 50,
+
+  veryLow: 1.20,
+  low: 1.50,
+  high: 3.00,
+  extreme: 10.00
+};
+
+const CSV_PATH =
+  process.env.AVIATOR_CSV_PATH ||
+  path.join(__dirname, "..", "data", "aviator_rounds.csv");
+
+let cache = {
+  rows: [],
+  loadedAt: null
+};
+
+// ------------------------------------------------------------
+// UTILITIES
+// ------------------------------------------------------------
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function mean(values) {
+  if (!values.length) return null;
+
+  return (
+    values.reduce((sum, value) => sum + value, 0) /
+    values.length
+  );
+}
+
+function median(values) {
+  if (!values.length) return null;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+
+  if (sorted.length % 2) {
+    return sorted[middle];
+  }
+
+  return (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function standardDeviation(values) {
+  if (values.length < 2) return 0;
+
+  const m = mean(values);
+
+  const variance =
+    values.reduce((sum, value) => {
+      return sum + Math.pow(value - m, 2);
+    }, 0) / values.length;
+
+  return Math.sqrt(variance);
+}
+
+function percentile(values, p) {
+  if (!values.length) return null;
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = (sorted.length - 1) * p;
+
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+
+  if (lower === upper) {
+    return sorted[lower];
+  }
+
+  return (
+    sorted[lower] +
+    (sorted[upper] - sorted[lower]) *
+      (position - lower)
+  );
+}
+
+function percentage(values, condition) {
+  if (!values.length) return 0;
+
+  return (
+    (values.filter(condition).length / values.length) *
+    100
+  );
+}
+
+function longestStreak(values, condition) {
+  let current = 0;
+  let best = 0;
+
+  for (const value of values) {
+    if (condition(value)) {
+      current++;
+      best = Math.max(best, current);
+    } else {
+      current = 0;
+    }
+  }
+
+  return best;
+}
+
+// ------------------------------------------------------------
+// CSV
+// ------------------------------------------------------------
+
+function parseCSV(text) {
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .filter(line => line.trim() !== "");
+
+  if (!lines.length) {
+    return [];
+  }
+
+  const headers = lines[0]
+    .split(",")
+    .map(x => x.trim().toLowerCase());
+
+  const multiplierAliases = [
+    "multiplier",
+    "crash",
+    "crashpoint",
+    "value",
+    "coefficient",
+    "result"
+  ];
+
+  const roundAliases = [
+    "roundid",
+    "round_id",
+    "round",
+    "id"
+  ];
+
+  const timestampAliases = [
+    "timestamp",
+    "time",
+    "date",
+    "datetime"
+  ];
+
+  const findHeader = aliases =>
+    aliases.find(alias => headers.includes(alias));
+
+  const multiplierKey = findHeader(multiplierAliases);
+  const roundKey = findHeader(roundAliases);
+  const timestampKey = findHeader(timestampAliases);
+
+  if (!multiplierKey) {
+    throw new Error(
+      "CSV must contain a multiplier/crash/value column."
+    );
+  }
+
+  return lines.slice(1).map((line, index) => {
+    const cells = line.split(",");
+    const object = {};
+
+    headers.forEach((header, cellIndex) => {
+      object[header] = (cells[cellIndex] || "").trim();
+    });
+
+    return {
+      roundId: roundKey
+        ? object[roundKey] || String(index + 1)
+        : String(index + 1),
+
+      multiplier: numberOrNull(
+        object[multiplierKey]
+      ),
+
+      timestamp: timestampKey
+        ? object[timestampKey] || null
+        : null,
+
+      sourceRow: index + 2
+    };
+  });
+}
+
+function loadCSV() {
+  if (!fs.existsSync(CSV_PATH)) {
+    throw new Error(
+      `CSV not found: ${CSV_PATH}`
+    );
+  }
+
+  const text = fs.readFileSync(
+    CSV_PATH,
+    "utf8"
+  );
+
+  const parsed = parseCSV(text);
+
+  cache.rows = parsed;
+  cache.loadedAt = new Date().toISOString();
+
+  return parsed;
+}
+
+function getRows() {
+  if (!cache.rows.length) {
+    loadCSV();
+  }
+
+  return cache.rows;
+}
+
+function getValidRows() {
+  return getRows().filter(
+    row =>
+      Number.isFinite(row.multiplier) &&
+      row.multiplier > 0
+  );
+}
+
+function getValues() {
+  return getValidRows().map(
+    row => row.multiplier
+  );
+}
+
+// ------------------------------------------------------------
+// DATA QUALITY
+// ------------------------------------------------------------
+
+function getDataQuality() {
+  const all = getRows();
+  const valid = getValidRows();
+
+  const invalidRows =
+    all.length - valid.length;
+
+  const ids = valid.map(row =>
+    String(row.roundId)
+  );
+
+  const duplicateRoundIds =
+    ids.length - new Set(ids).size;
+
+  const timestamped = valid.filter(
+    row =>
+      row.timestamp &&
+      !Number.isNaN(
+        Date.parse(row.timestamp)
+      )
+  );
+
+  let chronologicalViolations = 0;
+
+  for (
+    let i = 1;
+    i < timestamped.length;
+    i++
+  ) {
+    if (
+      Date.parse(timestamped[i].timestamp) <
+      Date.parse(timestamped[i - 1].timestamp)
+    ) {
+      chronologicalViolations++;
+    }
+  }
+
+  const ready =
+    valid.length >= CONFIG.minHistory &&
+    invalidRows === 0 &&
+    duplicateRoundIds === 0 &&
+    chronologicalViolations === 0;
+
+  return {
+    state: ready ? "READY" : "LIMITED",
+    ready,
+
+    totalRows: all.length,
+    validRows: valid.length,
+    invalidRows,
+
+    duplicateRoundIds,
+    chronologicalViolations,
+
+    minimumRequired:
+      CONFIG.minHistory,
+
+    source:
+      path.basename(CSV_PATH),
+
+    loadedAt: cache.loadedAt
+  };
+}
+
+// ------------------------------------------------------------
+// DISTRIBUTION
+// ------------------------------------------------------------
+
+function getDistribution(values) {
+  return {
+    count: values.length,
+
+    min: values.length
+      ? Math.min(...values)
+      : null,
+
+    max: values.length
+      ? Math.max(...values)
+      : null,
+
+    mean: mean(values),
+    median: median(values),
+
+    stdev:
+      standardDeviation(values),
+
+    p25:
+      percentile(values, 0.25),
+
+    p75:
+      percentile(values, 0.75),
+
+    targetRate:
+      percentage(
+        values,
+        value =>
+          value >= CONFIG.target
+      ),
+
+    lowRate:
+      percentage(
+        values,
+        value =>
+          value < CONFIG.low
+      ),
+
+    veryLowRate:
+      percentage(
+        values,
+        value =>
+          value < CONFIG.veryLow
+      ),
+
+    highRate:
+      percentage(
+        values,
+        value =>
+          value >= CONFIG.high
+      ),
+
+    extremeRate:
+      percentage(
+        values,
+        value =>
+          value >= CONFIG.extreme
+      ),
+
+    lowStreak:
+      longestStreak(
+        values,
+        value =>
+          value < CONFIG.low
+      ),
+
+    veryLowStreak:
+      longestStreak(
+        values,
+        value =>
+          value < CONFIG.veryLow
+      )
+  };
+}
+
+// ------------------------------------------------------------
+// ROLLING WINDOWS
+// ------------------------------------------------------------
+
+function getWindows(values) {
+  return {
+    short:
+      getDistribution(
+        values.slice(
+          -CONFIG.shortWindow
+        )
+      ),
+
+    medium:
+      getDistribution(
+        values.slice(
+          -CONFIG.mediumWindow
+        )
+      ),
+
+    long:
+      getDistribution(
+        values.slice(
+          -CONFIG.longWindow
+        )
+      )
+  };
+}
+
+// ------------------------------------------------------------
+// REGIME
+// ------------------------------------------------------------
+
+function getRegime(windows) {
+  if (!windows.long.count) {
+    return "UNKNOWN";
+  }
+
+  if (
+    windows.short.stdev >
+    windows.long.stdev * 1.35
+  ) {
+    return "HIGH_VOLATILITY";
+  }
+
+  if (
+    windows.short.targetRate >
+    windows.long.targetRate + 15
+  ) {
+    return "ELEVATED_ACTIVITY";
+  }
+
+  if (
+    windows.short.targetRate <
+    windows.long.targetRate - 15
+  ) {
+    return "LOW_ACTIVITY";
+  }
+
+  return "BASELINE";
+}
+
+// ------------------------------------------------------------
+// TRANSITIONS
+// ------------------------------------------------------------
+
+function getTransitions(values) {
+  const result = {
+    afterLow: {
+      total: 0,
+      target: 0,
+      rate: null
+    },
+
+    afterVeryLow: {
+      total: 0,
+      target: 0,
+      rate: null
+    },
+
+    afterTarget: {
+      total: 0,
+      target: 0,
+      rate: null
+    }
+  };
+
+  for (
+    let i = 0;
+    i < values.length - 1;
+    i++
+  ) {
+    const current = values[i];
+    const next = values[i + 1];
+
+    if (current < CONFIG.low) {
+      result.afterLow.total++;
+
+      if (next >= CONFIG.target) {
+        result.afterLow.target++;
+      }
+    }
+
+    if (current < CONFIG.veryLow) {
+      result.afterVeryLow.total++;
+
+      if (next >= CONFIG.target) {
+        result.afterVeryLow.target++;
+      }
+    }
+
+    if (current >= CONFIG.target) {
+      result.afterTarget.total++;
+
+      if (next >= CONFIG.target) {
+        result.afterTarget.target++;
+      }
+    }
+  }
+
+  for (const key of Object.keys(result)) {
+    if (result[key].total) {
+      result[key].rate =
+        result[key].target /
+        result[key].total *
+        100;
+    }
+  }
+
+  return result;
+}
+
+// ------------------------------------------------------------
+// AUTOCORRELATION
+// ------------------------------------------------------------
+
+function getLag1Autocorrelation(values) {
+  if (values.length < 3) {
+    return 0;
+  }
+
+  const x = values.slice(0, -1);
+  const y = values.slice(1);
+
+  const mx = mean(x);
+  const my = mean(y);
+
+  let numerator = 0;
+  let denominatorX = 0;
+  let denominatorY = 0;
+
+  for (let i = 0; i < x.length; i++) {
+    const dx = x[i] - mx;
+    const dy = y[i] - my;
+
+    numerator += dx * dy;
+    denominatorX += dx * dx;
+    denominatorY += dy * dy;
+  }
+
+  if (
+    denominatorX === 0 ||
+    denominatorY === 0
+  ) {
+    return 0;
+  }
+
+  return (
+    numerator /
+    Math.sqrt(
+      denominatorX *
+      denominatorY
+    )
+  );
+}
+
+// ------------------------------------------------------------
+// MODEL
+// ------------------------------------------------------------
+
+function buildModel(values) {
+  const windows =
+    getWindows(values);
+
+  const transitions =
+    getTransitions(values);
+
+  const autocorrelation =
+    getLag1Autocorrelation(values);
+
+  let score = 50;
+
+  const reasons = [];
+  const featureContributions = [];
+
+  function addFeature(
+    feature,
+    points,
+    reason
+  ) {
+    score += points;
+
+    featureContributions.push({
+      feature,
+      points
+    });
+
+    if (reason) {
+      reasons.push(reason);
+    }
+  }
+
+  if (
+    windows.medium.targetRate >
+    windows.long.targetRate + 10
+  ) {
+    addFeature(
+      "medium_vs_long",
+      8,
+      "Medium-window target activity is above the long-window baseline."
+    );
+  } else if (
+    windows.medium.targetRate <
+    windows.long.targetRate - 10
+  ) {
+    addFeature(
+      "medium_vs_long",
+      -8,
+      "Medium-window target activity is below the long-window baseline."
+    );
+  }
+
+  if (
+    windows.short.targetRate >
+    windows.medium.targetRate + 12
+  ) {
+    addFeature(
+      "short_vs_medium",
+      6,
+      "Recent target activity is stronger than the medium window."
+    );
+  } else if (
+    windows.short.targetRate <
+    windows.medium.targetRate - 12
+  ) {
+    addFeature(
+      "short_vs_medium",
+      -6,
+      "Recent target activity is weaker than the medium window."
+    );
+  }
+
+  if (
+    windows.short.veryLowStreak >= 3
+  ) {
+    addFeature(
+      "very_low_streak",
+      5,
+      "A very-low streak exists. This is weak transition evidence only."
+    );
+  }
+
+  if (
+    windows.short.lowStreak >= 4
+  ) {
+    addFeature(
+      "low_streak",
+      4,
+      "A recent low-result streak exists. Streaks alone are not sufficient."
+    );
+  }
+
+  const latest =
+    values[values.length - 1];
+
+  if (
+    latest >= CONFIG.high
+  ) {
+    addFeature(
+      "latest_high",
+      -4,
+      "The latest round was high; immediate continuation is not assumed."
+    );
+  }
+
+  if (
+    latest < CONFIG.veryLow
+  ) {
+    addFeature(
+      "latest_very_low",
+      3,
+      "The latest round was very low; transition evidence is mildly supportive."
+    );
+  }
+
+  if (
+    Math.abs(autocorrelation) >= 0.25
+  ) {
+    addFeature(
+      "autocorrelation",
+      autocorrelation > 0 ? 2 : -2,
+      `Lag-1 autocorrelation is ${autocorrelation.toFixed(2)}.`
+    );
+  }
+
+  if (
+    transitions.afterLow.rate !== null
+  ) {
+    if (
+      transitions.afterLow.rate >= 60
+    ) {
+      addFeature(
+        "after_low_transition",
+        4,
+        `Observed target rate after low rounds is ${transitions.afterLow.rate.toFixed(1)}%.`
+      );
+    } else if (
+      transitions.afterLow.rate <= 40
+    ) {
+      addFeature(
+        "after_low_transition",
+        -4,
+        `Observed target rate after low rounds is only ${transitions.afterLow.rate.toFixed(1)}%.`
+      );
+    }
+  }
+
+  const regime =
+    getRegime(windows);
+
+  if (
+    regime === "HIGH_VOLATILITY"
+  ) {
+    addFeature(
+      "regime",
+      -5,
+      "Current rolling regime is high volatility."
+    );
+  }
+
+  score =
+    Math.max(
+      0,
+      Math.min(100, score)
+    );
+
+  let action = "NO SIGNAL";
+
+  if (
+    score >=
+    CONFIG.strongThreshold
+  ) {
+    action = "SIGNAL";
+  } else if (
+    score >=
+    CONFIG.signalThreshold
+  ) {
+    action = "WATCH";
+  }
+
+  const confidence =
+    Math.max(
+      50,
+      Math.min(
+        90,
+        Math.round(
+          50 +
+          Math.abs(score - 50) *
+            0.8
+        )
+      )
+    );
+
+  return {
+    score,
+    action,
+    confidence,
+
+    reasons,
+
+    featureContributions,
+
+    windows,
+    transitions,
+    autocorrelation,
+    regime
+  };
+}
+
+// ------------------------------------------------------------
+// WALK-FORWARD BACKTEST
+// ------------------------------------------------------------
+
+function runBacktest(values) {
+  let samples = 0;
+  let hits = 0;
+  let misses = 0;
+
+  const recent = [];
+
+  for (
+    let i = CONFIG.minHistory;
+    i < values.length;
+    i++
+  ) {
+    const training =
+      values.slice(0, i);
+
+    const model =
+      buildModel(training);
+
+    if (
+      model.score >=
+      CONFIG.signalThreshold
+    ) {
+      samples++;
+
+      const actual =
+        values[i];
+
+      const hit =
+        actual >= CONFIG.target;
+
+      if (hit) {
+        hits++;
+      } else {
+        misses++;
+      }
+
+      recent.push({
+        position: i + 1,
+        score: model.score,
+        action: model.action,
+        predictedTarget: true,
+        actual,
+        hit
+      });
+    }
+  }
+
+  const hitRate =
+    samples
+      ? hits / samples * 100
+      : 0;
+
+  const available =
+    Math.max(
+      1,
+      values.length -
+      CONFIG.minHistory
+    );
+
+  const coverage =
+    samples / available * 100;
+
+  const falseSignalRate =
+    samples
+      ? 100 - hitRate
+      : 0;
+
+  const stable =
+    samples >=
+    CONFIG.minBacktestSamples &&
+    hitRate >=
+    CONFIG.stableHitRate;
+
+  return {
+    samples,
+    hits,
+    misses,
+
+    hitRate,
+    coverage,
+    falseSignalRate,
+
+    stable,
+
+    minimumSamples:
+      CONFIG.minBacktestSamples,
+
+    threshold:
+      CONFIG.signalThreshold,
+
+    recent:
+      recent.slice(-20)
+  };
+}
+
+// ------------------------------------------------------------
+// EVIDENCE GATES
+// ------------------------------------------------------------
+
+function getEvidenceGate(
+  quality,
+  backtest,
+  model
+) {
+  const gates = [
+    {
+      name: "dataQuality",
+      pass: quality.ready,
+      detail:
+        quality.ready
+          ? "Dataset passes quality checks."
+          : "Dataset quality gate failed."
+    },
+
+    {
+      name: "minimumHistory",
+      pass:
+        quality.validRows >=
+        CONFIG.minHistory,
+      detail:
+        `${quality.validRows}/${CONFIG.minHistory} minimum valid rounds.`
+    },
+
+    {
+      name: "backtestSamples",
+      pass:
+        backtest.samples >=
+        CONFIG.minBacktestSamples,
+      detail:
+        `${backtest.samples}/${CONFIG.minBacktestSamples} qualifying historical signals.`
+    },
+
+    {
+      name: "backtestStability",
+      pass:
+        backtest.stable,
+      detail:
+        backtest.samples
+          ? `Hit rate ${backtest.hitRate.toFixed(1)}%.`
+          : "No qualifying signals."
+    },
+
+    {
+      name: "volatility",
+      pass:
+        model.regime !==
+        "HIGH_VOLATILITY",
+      detail:
+        model.regime
+    }
+  ];
+
+  const pass =
+    gates.every(
+      gate => gate.pass
+    ) &&
+    model.score >=
+    CONFIG.signalThreshold;
+
+  return {
+    pass,
+    gates
+  };
+}
+
+// ------------------------------------------------------------
+// ROUND CONTEXT
+// ------------------------------------------------------------
+
+function getRoundContext(rows) {
+  const previous =
+    rows.length >= 2
+      ? rows[rows.length - 2]
+      : null;
+
+  const latest =
+    rows.length
+      ? rows[rows.length - 1]
+      : null;
+
+  return {
+    previous:
+      previous
+        ? previous.multiplier
+        : null,
+
+    latest:
+      latest
+        ? latest.multiplier
+        : null,
+
+    next: null,
+
+    entry: null,
+
+    entryRule:
+      "V1.1.1 has no live Aviator round clock and never fabricates an entry time."
+  };
+}
+
+// ------------------------------------------------------------
+// CANONICAL API RESPONSE
+// ------------------------------------------------------------
+
+function createCanonicalResponse() {
+  const rows =
+    getValidRows();
+
+  const values =
+    rows.map(
+      row => row.multiplier
+    );
+
+  const quality =
+    getDataQuality();
+
+  const summary =
+    getDistribution(values);
+
+  const model =
+    buildModel(values);
+
+  const backtest =
+    runBacktest(values);
+
+  const evidence =
+    getEvidenceGate(
+      quality,
+      backtest,
+      model
+    );
+
+  let action =
+    model.action;
+
+  if (!evidence.pass) {
+    action = "NO SIGNAL";
+  }
+
+  const risk =
+    action === "SIGNAL" ||
+    action === "WATCH"
+      ? "RESEARCH-ONLY / HIGH RISK"
+      : "NO TRADE";
+
+  return {
+    ok: true,
+
+    version: VERSION,
+
+    mode: "RESEARCH",
+
+    source:
+      "CSV HISTORICAL DATA",
+
+    timezone: "UTC",
+
+    signal: {
+      action,
+
+      score:
+        model.score,
+
+      confidence:
+        evidence.pass
+          ? model.confidence
+          : 50,
+
+      risk,
+
+      evidenceStrength:
+        evidence.pass
+          ? "SUFFICIENT"
+          : "INSUFFICIENT",
+
+      reasons:
+        evidence.pass
+          ? model.reasons
+          : [
+              "Evidence gates are not satisfied. No signal is issued."
+            ]
+    },
+
+    roundContext:
+      getRoundContext(rows),
+
+    dataset: {
+      quality,
+
+      summary
+    },
+
+    research: {
+      windows:
+        model.windows,
+
+      regime:
+        model.regime,
+
+      autocorrelation:
+        model.autocorrelation,
+
+      transitions:
+        model.transitions
+    },
+
+    backtest,
+
+    evidence: {
+      pass:
+        evidence.pass,
+
+      gates:
+        evidence.gates,
+
+      featureContributions:
+        model.featureContributions
+    },
+
+    recentRounds:
+      values
+        .slice(-20)
+        .map(
+          (multiplier, index) => ({
+            position:
+              values.length -
+              Math.min(
+                values.length,
+                20
+              ) +
+              index +
+              1,
+
+            multiplier
+          })
+        )
+  };
+}
+
+function safeCanonicalResponse() {
+  try {
+    return createCanonicalResponse();
+  } catch (error) {
+    return {
+      ok: false,
+
+      version: VERSION,
+
+      mode: "RESEARCH",
+
+      error:
+        error.message,
+
+      signal: {
+        action: "NO SIGNAL",
+        score: 0,
+        confidence: 0,
+        risk: "DATA ERROR",
+        evidenceStrength:
+          "UNAVAILABLE",
+        reasons: [
+          error.message
+        ]
+      },
+
+      roundContext: {
+        previous: null,
+        latest: null,
+        next: null,
+        entry: null
+      },
+
+      dataset: {
+        quality: {
+          state: "ERROR"
+        },
+        summary: {}
+      },
+
+      research: {
+        windows: {},
+        regime: "UNKNOWN",
+        autocorrelation: 0,
+        transitions: {}
+      },
+
+      backtest: {
+        samples: 0,
+        hits: 0,
+        misses: 0,
+        hitRate: 0,
+        coverage: 0,
+        falseSignalRate: 0,
+        stable: false,
+        recent: []
+      },
+
+      evidence: {
+        pass: false,
+        gates: [],
+        featureContributions: []
+      },
+
+      recentRounds: []
+    };
+  }
+}
+
+// ------------------------------------------------------------
+// ROUTES
+// ------------------------------------------------------------
+
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    name: "AVIATOR AI PREDICTOR",
+    version: VERSION,
+    mode: "RESEARCH",
+    message:
+      "Historical research and walk-forward backtesting API. No guaranteed next-round prediction."
+  });
+});
+
+// ONE CANONICAL RESPONSE
+app.get(
+  "/api/analyze",
+  (req, res) => {
+    res.json(
+      safeCanonicalResponse()
+    );
+  }
+);
+
+// SAME CANONICAL RESPONSE.
+// This prevents frontend/backend response mismatch.
+app.get(
+  "/api/backtest",
+  (req, res) => {
+    res.json(
+      safeCanonicalResponse()
+    );
+  }
+);
+
+app.get(
+  "/api/status",
+  (req, res) => {
+    const data =
+      safeCanonicalResponse();
+
+    res.json({
+      ok: data.ok,
+      version: VERSION,
+      mode: "RESEARCH",
+
+      quality:
+        data.dataset.quality,
+
+      signal:
+        data.signal,
+
+      backtest:
+        data.backtest,
+
+      canonicalEndpoint:
+        "/api/analyze"
+    });
+  }
+);
+
+app.get(
+  "/api/history",
+  (req, res) => {
+    try {
+      const data =
+        getValidRows();
+
+      res.json({
+        ok: true,
+        version: VERSION,
+        count: data.length,
+        rounds: data
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ------------------------------------------------------------
+// START
+// ------------------------------------------------------------
+
+app.listen(PORT, () => {
+  console.log(
+    `AVIATOR AI PREDICTOR ${VERSION} running on port ${PORT}`
+  );
+
+  console.log(
+    `CSV: ${CSV_PATH}`
+  );
+});
