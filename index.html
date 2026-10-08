@@ -1,1 +1,517 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AVIATOR AI PREDICTOR V1.0</title><link rel="stylesheet" href="style.css"></head><body><main class="app"><header><div><small>AVIATOR AI</small><h1>PREDICTOR V1.0</h1><p>Collect → Analyze → Backtest → Score → Signal</p></div><b id="api">API OFFLINE</b></header><div class="notice"><strong>V1.0:</strong> Historical evidence and walk-forward analysis only. No guaranteed next multiplier.</div><section class="card controls"><button id="analyze">ANALYZE</button><button id="backtest">BACKTEST</button><button id="history">HISTORY</button><div id="status">Ready.</div></section><section class="grid two"><article class="card"><small>CURRENT SIGNAL</small><div id="action" class="action">WAIT</div><div class="metrics"><div>Score<strong id="score">—</strong></div><div>Confidence<strong id="confidence">—</strong></div><div>Risk<strong id="risk">—</strong></div></div><div id="reasons"></div></article><article class="card"><small>ROUND CONTEXT</small><div class="metrics"><div>Previous<strong id="prev">—</strong></div><div>Latest<strong id="latest">—</strong></div><div>Next<strong id="next">—</strong></div></div><p>Entry: <strong id="entry">—</strong></p></article></section><section class="grid three"><article class="card"><small>DATASET</small><h2 id="samples">—</h2><div id="summary"></div></article><article class="card"><small>RECENT WINDOW</small><div id="recent"></div></article><article class="card"><small>WALK-FORWARD BACKTEST</small><h2 id="hit">—</h2><div id="bt"></div></article></section><section class="card"><small>RECENT ROUNDS</small><div id="table"></div></section><footer>AVIATOR AI PREDICTOR V1.0 <span id="time">—</span></footer></main><script src="script.js"></script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>
+    AVIATOR AI PREDICTOR V1.1.1
+  </title>
+
+  <link
+    rel="stylesheet"
+    href="style.css"
+  >
+</head>
+
+<body>
+
+<main class="container">
+
+  <header class="hero">
+
+    <div>
+
+      <div class="eyebrow">
+        RESEARCH • BACKTEST • EVIDENCE
+      </div>
+
+      <h1>
+        AVIATOR AI PREDICTOR
+        <span>V1.1.1</span>
+      </h1>
+
+      <p>
+        Historical-data research system —
+        not a guaranteed next-round predictor.
+      </p>
+
+    </div>
+
+    <div class="version-box">
+      API
+      <strong id="version">
+        V1.1.1
+      </strong>
+
+      <br>
+
+      <small id="updated">
+        —
+      </small>
+    </div>
+
+  </header>
+
+
+  <section class="toolbar">
+
+    <button id="analyzeBtn">
+      ANALYZE
+    </button>
+
+    <button id="backtestBtn">
+      BACKTEST
+    </button>
+
+    <button id="historyBtn">
+      HISTORY
+    </button>
+
+  </section>
+
+
+  <!-- CURRENT SIGNAL -->
+
+  <section class="panel signal-panel">
+
+    <h2>
+      Current Signal
+    </h2>
+
+    <div class="signal-grid">
+
+      <div>
+        <span>Action</span>
+        <strong
+          id="action"
+          class="value no-signal"
+        >
+          —
+        </strong>
+      </div>
+
+      <div>
+        <span>Evidence Score</span>
+        <strong
+          id="score"
+          class="value"
+        >
+          —
+        </strong>
+      </div>
+
+      <div>
+        <span>Confidence Index</span>
+        <strong
+          id="confidence"
+          class="value"
+        >
+          —
+        </strong>
+      </div>
+
+      <div>
+        <span>Risk</span>
+        <strong
+          id="risk"
+          class="value"
+        >
+          —
+        </strong>
+      </div>
+
+      <div>
+        <span>Evidence</span>
+        <strong
+          id="evidence"
+          class="value"
+        >
+          —
+        </strong>
+      </div>
+
+    </div>
+
+
+    <h3>
+      Reasons
+    </h3>
+
+    <ul id="reasons"></ul>
+
+  </section>
+
+
+  <!-- ROUND + QUALITY -->
+
+  <section class="grid">
+
+    <div class="panel">
+
+      <h2>
+        Round Context
+      </h2>
+
+      <div class="facts">
+
+        <div>
+          <span>Previous</span>
+          <b id="previous">—</b>
+        </div>
+
+        <div>
+          <span>Latest</span>
+          <b id="latest">—</b>
+        </div>
+
+        <div>
+          <span>Next</span>
+          <b id="next">—</b>
+        </div>
+
+        <div>
+          <span>Entry</span>
+          <b id="entry">—</b>
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <div class="panel">
+
+      <h2>
+        Data Quality
+      </h2>
+
+      <div class="facts">
+
+        <div>
+          <span>State</span>
+          <b id="quality">—</b>
+        </div>
+
+        <div>
+          <span>Valid rounds</span>
+          <b id="rounds">—</b>
+        </div>
+
+        <div>
+          <span>Invalid</span>
+          <b id="invalid">—</b>
+        </div>
+
+        <div>
+          <span>Duplicates</span>
+          <b id="duplicates">—</b>
+        </div>
+
+        <div>
+          <span>Source</span>
+          <b id="source">—</b>
+        </div>
+
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <!-- DISTRIBUTION -->
+
+  <section class="panel">
+
+    <h2>
+      Distribution
+    </h2>
+
+    <div class="metrics">
+
+      <div>
+        <span>Min</span>
+        <b id="min">—</b>
+      </div>
+
+      <div>
+        <span>Median</span>
+        <b id="median">—</b>
+      </div>
+
+      <div>
+        <span>Mean</span>
+        <b id="mean">—</b>
+      </div>
+
+      <div>
+        <span>Max</span>
+        <b id="max">—</b>
+      </div>
+
+      <div>
+        <span>Stdev</span>
+        <b id="stdev">—</b>
+      </div>
+
+      <div>
+        <span>P75</span>
+        <b id="p75">—</b>
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <!-- ROLLING WINDOWS -->
+
+  <section class="panel">
+
+    <h2>
+      Rolling Research Windows
+    </h2>
+
+    <div class="metrics">
+
+      <div>
+        <span>
+          Short target rate
+        </span>
+        <b id="shortTarget">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>
+          Medium target rate
+        </span>
+        <b id="mediumTarget">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>
+          Long target rate
+        </span>
+        <b id="longTarget">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>
+          Short low streak
+        </span>
+        <b id="shortStreak">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>
+          Very-low streak
+        </span>
+        <b id="veryLowStreak">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>
+          Regime
+        </span>
+        <b id="regime">
+          —
+        </b>
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <!-- RESEARCH -->
+
+  <section class="grid">
+
+    <div class="panel">
+
+      <h2>
+        Research Evidence
+      </h2>
+
+      <div class="metrics">
+
+        <div>
+          <span>
+            Lag-1 autocorrelation
+          </span>
+
+          <b id="autocorr">
+            —
+          </b>
+        </div>
+
+        <div>
+          <span>
+            Target after low
+          </span>
+
+          <b id="afterLow">
+            —
+          </b>
+        </div>
+
+        <div>
+          <span>
+            Target after very low
+          </span>
+
+          <b id="afterVeryLow">
+            —
+          </b>
+        </div>
+
+      </div>
+
+    </div>
+
+
+    <div class="panel">
+
+      <h2>
+        Evidence Gates
+      </h2>
+
+      <ul id="gates"></ul>
+
+    </div>
+
+  </section>
+
+
+  <!-- BACKTEST -->
+
+  <section class="panel">
+
+    <h2>
+      Walk-Forward Backtest
+    </h2>
+
+    <div class="metrics">
+
+      <div>
+        <span>Samples</span>
+        <b id="btSamples">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>Hits</span>
+        <b id="btHits">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>Misses</span>
+        <b id="btMisses">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>Hit rate</span>
+        <b id="btRate">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>Coverage</span>
+        <b id="btCoverage">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>False signal</span>
+        <b id="btFalse">
+          —
+        </b>
+      </div>
+
+      <div>
+        <span>Stable</span>
+        <b id="btStable">
+          —
+        </b>
+      </div>
+
+    </div>
+
+  </section>
+
+
+  <!-- FEATURES + ROUNDS -->
+
+  <section class="grid">
+
+    <div class="panel">
+
+      <h2>
+        Feature Contributions
+      </h2>
+
+      <ul id="features"></ul>
+
+    </div>
+
+
+    <div class="panel">
+
+      <h2>
+        Recent Rounds
+      </h2>
+
+      <table>
+
+        <thead>
+
+          <tr>
+            <th>Position</th>
+            <th>Multiplier</th>
+          </tr>
+
+        </thead>
+
+        <tbody id="roundTable"></tbody>
+
+      </table>
+
+    </div>
+
+  </section>
+
+
+  <footer>
+    Research mode only.
+    Historical evidence can be tested;
+    it cannot guarantee the next Aviator multiplier.
+  </footer>
+
+</main>
+
+<script src="script.js"></script>
+
+</body>
+</html>
