@@ -1,360 +1,603 @@
-'use strict';
-
-/*
-===========================================================
- AVIATOR AI PREDICTOR V1.0
- Frontend API client
-
- BACKEND:
- https://aviator-ai-predictor-v1.onrender.com
-
- IMPORTANT:
- This file uses the same API response contract as backend/server.js.
-===========================================================
-*/
+// ============================================================
+// AVIATOR AI PREDICTOR
+// Frontend V1.1.1
+//
+// IMPORTANT:
+// Frontend contains NO prediction logic.
+// It only renders the canonical /api/analyze response.
+// ============================================================
 
 const API_BASE =
-  window.AVIATOR_API_BASE ||
-  'https://aviator-ai-predictor-v1.onrender.com';
+  "https://aviator-ai-predictor-v1.onrender.com";
 
-const q = (id) => document.getElementById(id);
+const $ = id =>
+  document.getElementById(id);
 
-const api = q('api');
-const status = q('status');
-
-const esc = (s) =>
-  String(s).replace(
-    /[&<>"']/g,
-    (c) => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#039;'
-    }[c])
-  );
-
-const mul = (v) =>
-  v == null ? '—' : Number(v).toFixed(2) + 'x';
-
-const pct = (v) =>
-  v == null ? '—' : Number(v).toFixed(2) + '%';
-
-
-async function get(path) {
-  const r = await fetch(API_BASE + path);
-
-  if (!r.ok) {
-    throw new Error('HTTP ' + r.status);
+function fmt(value, digits = 2) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(Number(value))
+  ) {
+    return "—";
   }
 
-  return r.json();
+  return Number(value).toFixed(digits);
 }
 
-
-function show(d) {
-  if (!d || !d.ok) {
-    throw new Error('Invalid API response');
+function pct(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(Number(value))
+  ) {
+    return "—";
   }
 
-  /*
-  =========================================================
-   API STATUS
-  =========================================================
-  */
+  return `${Number(value).toFixed(1)}%`;
+}
 
-  api.textContent = 'API ONLINE';
-  api.className = 'on';
+function setText(id, value) {
+  const element = $(id);
 
+  if (element) {
+    element.textContent =
+      value === null ||
+      value === undefined
+        ? "—"
+        : value;
+  }
+}
 
-  /*
-  =========================================================
-   SIGNAL
-  =========================================================
-  */
+function actionClass(action) {
+  if (action === "SIGNAL") {
+    return "signal";
+  }
 
-  q('action').textContent = d.signal?.action || '—';
+  if (action === "WATCH") {
+    return "watch";
+  }
 
-  q('action').className =
-    'action ' +
-    String(d.signal?.action || '')
-      .toLowerCase();
+  return "no-signal";
+}
 
-  q('score').textContent =
-    d.signal?.score ?? '—';
-
-  q('confidence').textContent =
-    d.signal?.confidence != null
-      ? d.signal.confidence + '%'
-      : '—';
-
-  q('risk').textContent =
-    d.signal?.risk || '—';
-
-  q('reasons').innerHTML =
-    (d.signal?.reasons || [])
-      .map((x) => '<p>• ' + esc(x) + '</p>')
-      .join('');
-
-
-  /*
-  =========================================================
-   ROUND CONTEXT
-  =========================================================
-  */
-
-  q('prev').textContent =
-    d.previousRound
-      ? `#${d.previousRound.roundId} ${mul(d.previousRound.multiplier)}`
-      : '—';
-
-  q('latest').textContent =
-    d.latestRound
-      ? `#${d.latestRound.roundId} ${mul(d.latestRound.multiplier)}`
-      : '—';
-
-  q('next').textContent =
-    d.nextRound
-      ? `#${d.nextRound.roundId}`
-      : '—';
-
-  q('entry').textContent =
-    d.entry?.entryTime ||
-    (
-      d.entry?.entryRound
-        ? 'Next round #' + d.entry.entryRound
-        : '—'
+function render(data) {
+  if (!data || data.ok === false) {
+    setText(
+      "action",
+      "NO SIGNAL"
     );
 
+    setText("score", "—");
+    setText("confidence", "—");
 
-  /*
-  =========================================================
-   DATASET SUMMARY
-  =========================================================
-  */
+    setText(
+      "risk",
+      "DATA ERROR"
+    );
 
-  const s = d.analysis?.summary || {};
+    setText(
+      "evidence",
+      data?.error ||
+        "API unavailable"
+    );
 
-  const f =
-    d.analysis?.recent?.features || {};
+    return;
+  }
 
-  const b =
-    d.model?.backtest || {};
+  const signal =
+    data.signal || {};
 
-  q('samples').textContent =
-    s.samples ?? '—';
+  const quality =
+    data.dataset?.quality || {};
 
-  q('summary').innerHTML = [
-    ['Min', mul(s.min)],
-    ['Median', mul(s.median)],
-    ['Mean', mul(s.mean)],
-    ['Max', mul(s.max)]
-  ]
-    .map(
-      (x) =>
-        `<p>${x[0]} <strong>${x[1]}</strong></p>`
+  const summary =
+    data.dataset?.summary || {};
+
+  const windows =
+    data.research?.windows || {};
+
+  const backtest =
+    data.backtest || {};
+
+  const context =
+    data.roundContext || {};
+
+  const evidence =
+    data.evidence || {};
+
+  const action =
+    $("action");
+
+  if (action) {
+    action.textContent =
+      signal.action ||
+      "NO SIGNAL";
+
+    action.className =
+      `value ${actionClass(
+        signal.action
+      )}`;
+  }
+
+  setText(
+    "score",
+    fmt(signal.score, 0)
+  );
+
+  setText(
+    "confidence",
+    `${fmt(
+      signal.confidence,
+      0
+    )} / 100`
+  );
+
+  setText(
+    "risk",
+    signal.risk || "—"
+  );
+
+  setText(
+    "evidence",
+    signal.evidenceStrength ||
+      "—"
+  );
+
+  // ----------------------------------------------------------
+  // REASONS
+  // ----------------------------------------------------------
+
+  const reasons =
+    $("reasons");
+
+  if (reasons) {
+    reasons.innerHTML = "";
+
+    (
+      signal.reasons || []
+    ).forEach(reason => {
+      const li =
+        document.createElement(
+          "li"
+        );
+
+      li.textContent =
+        reason;
+
+      reasons.appendChild(li);
+    });
+  }
+
+  // ----------------------------------------------------------
+  // ROUND CONTEXT
+  // ----------------------------------------------------------
+
+  setText(
+    "previous",
+    context.previous === null ||
+    context.previous === undefined
+      ? "—"
+      : `${fmt(
+          context.previous
+        )}x`
+  );
+
+  setText(
+    "latest",
+    context.latest === null ||
+    context.latest === undefined
+      ? "—"
+      : `${fmt(
+          context.latest
+        )}x`
+  );
+
+  setText(
+    "next",
+    "Not predictable from V1.1.1"
+  );
+
+  setText(
+    "entry",
+    context.entry ||
+      "No live entry clock"
+  );
+
+  // ----------------------------------------------------------
+  // DATA QUALITY
+  // ----------------------------------------------------------
+
+  setText(
+    "quality",
+    quality.state ||
+      "—"
+  );
+
+  setText(
+    "rounds",
+    quality.validRows ??
+      "—"
+  );
+
+  setText(
+    "invalid",
+    quality.invalidRows ??
+      "—"
+  );
+
+  setText(
+    "duplicates",
+    quality.duplicateRoundIds ??
+      "—"
+  );
+
+  setText(
+    "source",
+    data.source ||
+      "CSV HISTORICAL DATA"
+  );
+
+  // ----------------------------------------------------------
+  // DISTRIBUTION
+  // ----------------------------------------------------------
+
+  setText(
+    "min",
+    fmt(summary.min)
+  );
+
+  setText(
+    "median",
+    fmt(summary.median)
+  );
+
+  setText(
+    "mean",
+    fmt(summary.mean)
+  );
+
+  setText(
+    "max",
+    fmt(summary.max)
+  );
+
+  setText(
+    "stdev",
+    fmt(summary.stdev)
+  );
+
+  setText(
+    "p75",
+    fmt(summary.p75)
+  );
+
+  // ----------------------------------------------------------
+  // WINDOWS
+  // ----------------------------------------------------------
+
+  setText(
+    "shortTarget",
+    pct(
+      windows.short?.targetRate
     )
-    .join('');
+  );
 
-
-  /*
-  =========================================================
-   RECENT WINDOW
-  =========================================================
-  */
-
-  const recentRates =
-    f.recentRates || {};
-
-  q('recent').innerHTML = [
-    ['Window', f.recentWindow ?? '—'],
-    ['Recent mean', mul(f.recentMean)],
-    ['>=2x rate', pct(recentRates.atLeast2)],
-    ['>=3x rate', pct(recentRates.atLeast3)],
-    ['Low streak', f.lowStreak ?? '—'],
-    ['Very-low streak', f.veryLowStreak ?? '—']
-  ]
-    .map(
-      (x) =>
-        `<p>${x[0]} <strong>${x[1]}</strong></p>`
+  setText(
+    "mediumTarget",
+    pct(
+      windows.medium?.targetRate
     )
-    .join('');
+  );
 
-
-  /*
-  =========================================================
-   BACKTEST
-  =========================================================
-  */
-
-  q('hit').textContent =
-    b.samples
-      ? pct(b.hitRate)
-      : '—';
-
-  q('bt').innerHTML = [
-    ['Samples', b.samples ?? 0],
-    ['Hits', b.hits ?? 0],
-    ['Misses', b.misses ?? 0],
-    ['Coverage', pct(b.coverage)]
-  ]
-    .map(
-      (x) =>
-        `<p>${x[0]} <strong>${x[1]}</strong></p>`
+  setText(
+    "longTarget",
+    pct(
+      windows.long?.targetRate
     )
-    .join('');
+  );
 
+  setText(
+    "shortStreak",
+    windows.short?.lowStreak ??
+      "—"
+  );
 
-  /*
-  =========================================================
-   RECENT ROUNDS TABLE
-  =========================================================
-  */
+  setText(
+    "veryLowStreak",
+    windows.short?.veryLowStreak ??
+      "—"
+  );
 
-  const rounds =
-    d.analysis?.recent?.rounds || [];
+  setText(
+    "regime",
+    data.research?.regime ||
+      "—"
+  );
 
-  q('table').innerHTML =
-    rounds
+  // ----------------------------------------------------------
+  // RESEARCH EVIDENCE
+  // ----------------------------------------------------------
+
+  setText(
+    "autocorr",
+    fmt(
+      data.research
+        ?.autocorrelation,
+      3
+    )
+  );
+
+  setText(
+    "afterLow",
+    pct(
+      data.research
+        ?.transitions
+        ?.afterLow
+        ?.rate
+    )
+  );
+
+  setText(
+    "afterVeryLow",
+    pct(
+      data.research
+        ?.transitions
+        ?.afterVeryLow
+        ?.rate
+    )
+  );
+
+  // ----------------------------------------------------------
+  // BACKTEST
+  // ----------------------------------------------------------
+
+  setText(
+    "btSamples",
+    backtest.samples ??
+      "—"
+  );
+
+  setText(
+    "btHits",
+    backtest.hits ??
+      "—"
+  );
+
+  setText(
+    "btMisses",
+    backtest.misses ??
+      "—"
+  );
+
+  setText(
+    "btRate",
+    pct(
+      backtest.hitRate
+    )
+  );
+
+  setText(
+    "btCoverage",
+    pct(
+      backtest.coverage
+    )
+  );
+
+  setText(
+    "btFalse",
+    pct(
+      backtest.falseSignalRate
+    )
+  );
+
+  setText(
+    "btStable",
+    backtest.stable
+      ? "YES"
+      : "NO"
+  );
+
+  // ----------------------------------------------------------
+  // EVIDENCE GATES
+  // ----------------------------------------------------------
+
+  const gateList =
+    $("gates");
+
+  if (gateList) {
+    gateList.innerHTML = "";
+
+    (
+      evidence.gates || []
+    ).forEach(gate => {
+      const li =
+        document.createElement(
+          "li"
+        );
+
+      li.textContent =
+        `${gate.pass ? "PASS" : "BLOCK"} — ` +
+        `${gate.name}: ` +
+        `${gate.detail}`;
+
+      li.className =
+        gate.pass
+          ? "pass"
+          : "block";
+
+      gateList.appendChild(li);
+    });
+  }
+
+  // ----------------------------------------------------------
+  // FEATURES
+  // ----------------------------------------------------------
+
+  const featureList =
+    $("features");
+
+  if (featureList) {
+    featureList.innerHTML = "";
+
+    (
+      evidence.featureContributions ||
+      []
+    ).forEach(feature => {
+      const li =
+        document.createElement(
+          "li"
+        );
+
+      const points =
+        Number(feature.points);
+
+      li.textContent =
+        `${feature.feature}: ` +
+        `${points > 0 ? "+" : ""}` +
+        `${points}`;
+
+      featureList.appendChild(li);
+    });
+  }
+
+  // ----------------------------------------------------------
+  // RECENT ROUNDS
+  // ----------------------------------------------------------
+
+  const table =
+    $("roundTable");
+
+  if (table) {
+    table.innerHTML = "";
+
+    (
+      data.recentRounds || []
+    )
       .slice()
       .reverse()
-      .map((r) => {
-        let label = 'MID';
+      .forEach(round => {
+        const tr =
+          document.createElement(
+            "tr"
+          );
 
-        if (r.multiplier >= 10) {
-          label = 'EXTREME';
-        } else if (r.multiplier >= 3) {
-          label = 'HIGH';
-        } else if (r.multiplier >= 2) {
-          label = 'TARGET+';
-        } else if (r.multiplier < 1.2) {
-          label = 'LOW';
+        tr.innerHTML =
+          `<td>${round.position}</td>` +
+          `<td>${fmt(
+            round.multiplier
+          )}x</td>`;
+
+        table.appendChild(tr);
+      });
+  }
+
+  // ----------------------------------------------------------
+  // VERSION / TIME
+  // ----------------------------------------------------------
+
+  setText(
+    "version",
+    data.version ||
+      "V1.1.1"
+  );
+
+  setText(
+    "updated",
+    new Date()
+      .toLocaleTimeString()
+  );
+}
+
+// ------------------------------------------------------------
+// API
+// ------------------------------------------------------------
+
+async function getCanonicalData() {
+  const response =
+    await fetch(
+      `${API_BASE}/api/analyze`,
+      {
+        cache: "no-store"
+      }
+    );
+
+  if (!response.ok) {
+    throw new Error(
+      `API HTTP ${response.status}`
+    );
+  }
+
+  return response.json();
+}
+
+async function refresh() {
+  setText(
+    "updated",
+    "Loading..."
+  );
+
+  try {
+    const data =
+      await getCanonicalData();
+
+    render(data);
+  } catch (error) {
+    render({
+      ok: false,
+      error:
+        error.message
+    });
+  }
+}
+
+// ------------------------------------------------------------
+// EVENTS
+// ------------------------------------------------------------
+
+document.addEventListener(
+  "DOMContentLoaded",
+  () => {
+    $("analyzeBtn")
+      ?.addEventListener(
+        "click",
+        refresh
+      );
+
+    $("backtestBtn")
+      ?.addEventListener(
+        "click",
+        refresh
+      );
+
+    $("historyBtn")
+      ?.addEventListener(
+        "click",
+        async () => {
+          try {
+            const response =
+              await fetch(
+                `${API_BASE}/api/history`,
+                {
+                  cache:
+                    "no-store"
+                }
+              );
+
+            const data =
+              await response.json();
+
+            alert(
+              `Loaded ${data.count} valid historical rounds.`
+            );
+          } catch (error) {
+            alert(
+              `History error: ${error.message}`
+            );
+          }
         }
+      );
 
-        return `
-          <div class="row">
-            <span>#${r.roundId}</span>
-            <strong>${mul(r.multiplier)}</strong>
-            <span>${label}</span>
-          </div>
-        `;
-      })
-      .join('');
-
-
-  /*
-  =========================================================
-   ANALYSIS TIME
-  =========================================================
-  */
-
-  q('time').textContent =
-    d.analyzedAt
-      ? new Date(d.analyzedAt).toLocaleString()
-      : '—';
-
-  status.textContent =
-    'V' + (d.version || '1.0') + ' analysis loaded.';
-}
-
-
-async function run(path, msg, render = true) {
-  try {
-    status.textContent = msg;
-
-    const d = await get(path);
-
-    if (render) {
-      show(d);
-    } else {
-      api.textContent = 'API ONLINE';
-      api.className = 'on';
-
-      status.textContent =
-        'Backtest loaded.';
-    }
-
-  } catch (e) {
-    api.textContent = 'API OFFLINE';
-    api.className = 'off';
-
-    status.textContent =
-      e.message || 'API request failed.';
+    refresh();
   }
-}
-
-
-/*
-===========================================================
- BUTTONS
-===========================================================
-*/
-
-q('analyze').onclick = () =>
-  run(
-    '/api/analyze',
-    'Analyzing...'
-  );
-
-
-q('backtest').onclick = () =>
-  run(
-    '/api/backtest',
-    'Running backtest...',
-    false
-  );
-
-
-q('history').onclick = async () => {
-  try {
-    status.textContent =
-      'Loading history...';
-
-    const d =
-      await get('/api/history');
-
-    const rounds =
-      d.rounds || [];
-
-    q('table').innerHTML =
-      rounds
-        .slice()
-        .reverse()
-        .map(
-          (r) => `
-            <div class="row">
-              <span>#${r.roundId}</span>
-              <strong>${mul(r.multiplier)}</strong>
-              <span>HISTORICAL</span>
-            </div>
-          `
-        )
-        .join('');
-
-    api.textContent = 'API ONLINE';
-    api.className = 'on';
-
-    status.textContent =
-      (d.total ?? rounds.length) +
-      ' rounds loaded.';
-
-  } catch (e) {
-    api.textContent = 'API OFFLINE';
-    api.className = 'off';
-
-    status.textContent =
-      e.message || 'History request failed.';
-  }
-};
-
-
-/*
-===========================================================
- INITIAL API CHECK
-===========================================================
-*/
-
-run(
-  '/api/analyze',
-  'Connecting to API...'
 );
