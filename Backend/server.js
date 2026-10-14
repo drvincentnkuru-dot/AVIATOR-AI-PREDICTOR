@@ -11,7 +11,7 @@ app.disable('x-powered-by');
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const VERSION = 'V1.1.3';
+const VERSION = 'V1.1.4';
 const PORT = Number(process.env.PORT || 10000);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
@@ -26,14 +26,18 @@ const TARGET_MULTIPLIER = 2;
 const MIN_HISTORY = 24;
 const BACKTEST_MIN_SAMPLES = 30;
 
-// Production threshold stays unchanged during diagnostics.
+// Keep production thresholds unchanged.
 const SIGNAL_THRESHOLD = 72;
 const WATCH_THRESHOLD = 60;
 const MAX_HISTORY_RESPONSE = 10000;
 
-// Exploratory thresholds only; these do not change live signal rules.
+// Exploratory only; never automatically select a production threshold.
 const DIAGNOSTIC_THRESHOLDS = [50, 55, 60, 65, 68, 72];
 const CHRONOLOGICAL_SEGMENTS = 4;
+
+// The latest 30% of chronological evaluations is reserved
+// as a holdout period. It is not used to select a threshold.
+const HOLDOUT_FRACTION = 0.30;
 
 let cache = {
   file: null,
@@ -145,7 +149,6 @@ const TIME_HEADERS = [
 function chooseColumn(headers, candidates) {
   for (const candidate of candidates) {
     const index = headers.indexOf(candidate);
-
     if (index >= 0) return index;
   }
 
@@ -161,7 +164,6 @@ function numericMultiplier(value) {
   if (!cleaned) return NaN;
 
   const n = Number(cleaned);
-
   return Number.isFinite(n) ? n : NaN;
 }
 
@@ -173,10 +175,12 @@ function parseRows(text, filePath) {
   }
 
   const headers = raw[0].map(normalizeHeader);
+
   const multiplierIndex = chooseColumn(
     headers,
     MULTIPLIER_HEADERS
   );
+
   const roundIndex = chooseColumn(headers, ROUND_HEADERS);
   const timeIndex = chooseColumn(headers, TIME_HEADERS);
 
@@ -218,10 +222,7 @@ function parseRows(text, filePath) {
 
     if (!roundId) missingRoundIds += 1;
 
-    if (
-      !timeUtc ||
-      !Number.isFinite(Date.parse(timeUtc))
-    ) {
+    if (!timeUtc || !Number.isFinite(Date.parse(timeUtc))) {
       missingTimes += 1;
     }
 
@@ -275,7 +276,6 @@ function parseRows(text, filePath) {
     }
 
     if (r.roundId) seenIds.add(r.roundId);
-
     deduped.push(r);
   }
 
@@ -372,8 +372,7 @@ function candidateCSVFiles() {
     .map((name) => path.join(DATA_DIR, name))
     .filter((p) => !preferredSet.has(path.resolve(p)));
 
-  // Keep the full research export first.
-  // Try other CSV files only if a preferred file is invalid.
+  // Prefer the full research export over the 58-round seed.
   return [...existingPreferred, ...remaining];
 }
 
@@ -570,7 +569,7 @@ function transitionRate(rows, condition) {
   };
 }
 
-// Historical evidence score, not a win probability.
+// Historical evidence score only; not a probability estimate.
 function scoreAt(rows, endIndex) {
   if (endIndex < MIN_HISTORY) {
     return {
@@ -676,12 +675,6 @@ function scoreAt(rows, endIndex) {
   };
 }
 
-/*
- * Calculate the performance of a chosen threshold over one
- * fixed set of already evaluated chronological positions.
- *
- * The exploratory thresholds do not modify SIGNAL_THRESHOLD.
- */
 function evaluateThreshold(evaluations, threshold) {
   const signals = evaluations.filter(
     (item) => item.score >= threshold
@@ -718,6 +711,10 @@ function evaluateThreshold(evaluations, threshold) {
     baselineSamples: total,
     baselineHits,
     baselineHitRate: roundNumber(baselineHitRate),
+    liftPercentagePoints:
+      hitRate !== null && baselineHitRate !== null
+        ? roundNumber(hitRate - baselineHitRate)
+        : null,
     falseSignalRate: signals.length
       ? roundNumber(100 * misses / signals.length)
       : null,
@@ -727,33 +724,27 @@ function evaluateThreshold(evaluations, threshold) {
       hitRate !== null &&
       baselineHitRate !== null &&
       hitRate > baselineHitRate,
-    // A historical comparison is not proof of future performance.
     diagnosticOnly: true
   };
 }
 
-/*
- * Split evaluations into four chronological segments.
- * Threshold comparisons within each segment are exploratory.
- */
 function buildChronologicalDiagnostics(evaluations) {
-  const segmentCount = CHRONOLOGICAL_SEGMENTS;
   const segments = [];
 
-  for (let s = 0; s < segmentCount; s += 1) {
+  for (let s = 0; s < CHRONOLOGICAL_SEGMENTS; s += 1) {
     const start = Math.floor(
-      evaluations.length * s / segmentCount
+      evaluations.length * s / CHRONOLOGICAL_SEGMENTS
     );
 
     const end = Math.floor(
-      evaluations.length * (s + 1) / segmentCount
+      evaluations.length * (s + 1) / CHRONOLOGICAL_SEGMENTS
     );
 
     const segmentEvaluations = evaluations.slice(start, end);
 
     segments.push({
       segment: s + 1,
-      period: `chronological segment ${s + 1} of ${segmentCount}`,
+      period: `chronological segment ${s + 1} of ${CHRONOLOGICAL_SEGMENTS}`,
       evaluatedPositions: segmentEvaluations.length,
       thresholds: DIAGNOSTIC_THRESHOLDS.map(
         (threshold) =>
@@ -765,14 +756,26 @@ function buildChronologicalDiagnostics(evaluations) {
   return segments;
 }
 
-function walkForward(rows) {
-  // Preserve the existing walk-forward evaluation logic.
-  // The baseline uses the same evaluated next-round positions.
-  const evaluatedNextRounds = [];
+function createEvaluations(rows) {
   const evaluations = [];
-  const signals = [];
 
-  const scoreCounts = {
+  // Each score uses only rounds preceding the evaluated next round.
+  for (let i = MIN_HISTORY; i < rows.length - 1; i += 1) {
+    const model = scoreAt(rows, i);
+
+    evaluations.push({
+      score: model.score,
+      actualNext: rows[i + 1].multiplier,
+      roundId: rows[i].roundId,
+      nextRoundId: rows[i + 1].roundId
+    });
+  }
+
+  return evaluations;
+}
+
+function scoreDistribution(evaluations) {
+  const counts = {
     below50: 0,
     from50to59: 0,
     from60to71: 0,
@@ -784,22 +787,10 @@ function walkForward(rows) {
   let minScore = null;
   let maxScore = null;
 
-  for (let i = MIN_HISTORY; i < rows.length - 1; i += 1) {
-    const model = scoreAt(rows, i);
-    const actualNext = rows[i + 1].multiplier;
-
-    evaluatedNextRounds.push(actualNext);
-
-    evaluations.push({
-      score: model.score,
-      actualNext,
-      roundId: rows[i].roundId
-    });
-
-    const score = model.score;
+  for (const item of evaluations) {
+    const score = item.score;
 
     scoreSum += score;
-
     minScore = minScore === null
       ? score
       : Math.min(minScore, score);
@@ -809,118 +800,173 @@ function walkForward(rows) {
       : Math.max(maxScore, score);
 
     if (score < 50) {
-      scoreCounts.below50 += 1;
+      counts.below50 += 1;
     } else if (score < 60) {
-      scoreCounts.from50to59 += 1;
-    } else if (score < SIGNAL_THRESHOLD) {
-      scoreCounts.from60to71 += 1;
+      counts.from50to59 += 1;
+    } else if (score < 72) {
+      counts.from60to71 += 1;
     } else if (score < 78) {
-      scoreCounts.from72to77 += 1;
+      counts.from72to77 += 1;
     } else {
-      scoreCounts.from78to100 += 1;
-    }
-
-    if (score >= SIGNAL_THRESHOLD) {
-      signals.push({
-        score,
-        hit: actualNext >= TARGET_MULTIPLIER,
-        actualNext,
-        roundId: rows[i].roundId
-      });
+      counts.from78to100 += 1;
     }
   }
 
-  const hits = signals.filter((s) => s.hit).length;
-  const misses = signals.length - hits;
-  const testedPositions = evaluatedNextRounds.length;
+  return {
+    minScore,
+    maxScore,
+    averageScore: evaluations.length
+      ? roundNumber(scoreSum / evaluations.length)
+      : null,
+    scoreCounts: counts
+  };
+}
 
-  const hitRate = signals.length
-    ? 100 * hits / signals.length
-    : null;
+function walkForward(rows) {
+  const allEvaluations = createEvaluations(rows);
 
-  const coverage = testedPositions
-    ? 100 * signals.length / testedPositions
-    : 0;
-
-  const baselineHits = evaluatedNextRounds.filter(
-    (v) => v >= TARGET_MULTIPLIER
-  ).length;
-
-  const baselineHitRate = testedPositions
-    ? 100 * baselineHits / testedPositions
-    : null;
-
-  const thresholdComparisons = DIAGNOSTIC_THRESHOLDS.map(
-    (threshold) => evaluateThreshold(evaluations, threshold)
+  // Keep the final chronological portion untouched by threshold selection.
+  const splitIndex = Math.floor(
+    allEvaluations.length * (1 - HOLDOUT_FRACTION)
   );
 
-  const chronologicalSegments =
-    buildChronologicalDiagnostics(evaluations);
+  const development = allEvaluations.slice(0, splitIndex);
+  const holdout = allEvaluations.slice(splitIndex);
+
+  // Production performance and gates are based on holdout only.
+  const production = evaluateThreshold(
+    holdout,
+    SIGNAL_THRESHOLD
+  );
+
+  const watchDiagnostic = evaluateThreshold(
+    holdout,
+    WATCH_THRESHOLD
+  );
+
+  const overallProduction = evaluateThreshold(
+    allEvaluations,
+    SIGNAL_THRESHOLD
+  );
+
+  const baselineHits = holdout.filter(
+    (item) => item.actualNext >= TARGET_MULTIPLIER
+  ).length;
+
+  const holdoutBaselineRate = holdout.length
+    ? 100 * baselineHits / holdout.length
+    : null;
+
+  const productionStable =
+    production.meetsMinimumSamples &&
+    production.aboveBaseline;
+
+  const watchEvidenceSufficient =
+    watchDiagnostic.meetsMinimumSamples &&
+    watchDiagnostic.aboveBaseline;
 
   return {
     target: `next round >= ${TARGET_MULTIPLIER.toFixed(2)}x`,
 
     method:
-      'Chronological walk-forward: each score uses only prior rounds; baseline uses the same evaluated positions.',
+      'Chronological walk-forward. Each score uses only prior rounds. The latest 30% of evaluated positions is reserved as holdout.',
 
-    minHistory: MIN_HISTORY,
-    testedPositions,
-
-    scoreDiagnostics: {
-      minScore,
-      maxScore,
-      averageScore: testedPositions
-        ? roundNumber(scoreSum / testedPositions)
-        : null,
-      scoreCounts,
-      threshold: SIGNAL_THRESHOLD
+    evaluationDesign: {
+      type: 'chronological-development-holdout',
+      developmentFraction: roundNumber(
+        100 * (1 - HOLDOUT_FRACTION)
+      ),
+      holdoutFraction: roundNumber(100 * HOLDOUT_FRACTION),
+      totalEvaluatedPositions: allEvaluations.length,
+      developmentPositions: development.length,
+      holdoutPositions: holdout.length,
+      thresholdSelection:
+        'No automatic threshold selection. Production threshold remains fixed at 72.',
+      limitation:
+        'The holdout is historical and does not guarantee future performance.'
     },
 
-    samples: signals.length,
-    hits,
-    misses,
-    hitRate: roundNumber(hitRate),
-    coverage: roundNumber(coverage),
+    minHistory: MIN_HISTORY,
 
-    baselineSamples: testedPositions,
+    // These compatibility fields now report holdout performance.
+    testedPositions: holdout.length,
+    samples: production.samples,
+    hits: production.hits,
+    misses: production.misses,
+    hitRate: production.hitRate,
+    coverage: production.coverage,
+
+    baselineSamples: holdout.length,
     baselineHits,
-    baselineHitRate: roundNumber(baselineHitRate),
+    baselineHitRate: roundNumber(holdoutBaselineRate),
 
-    falseSignalRate: signals.length
-      ? roundNumber(100 * misses / signals.length)
-      : null,
+    falseSignalRate: production.falseSignalRate,
+    meetsMinimumSamples: production.meetsMinimumSamples,
+    aboveBaseline: production.aboveBaseline,
+    stable: productionStable,
 
-    meetsMinimumSamples:
-      signals.length >= BACKTEST_MIN_SAMPLES,
+    scoreDiagnostics: {
+      ...scoreDistribution(allEvaluations),
+      threshold: SIGNAL_THRESHOLD,
+      scope: 'all chronological evaluations'
+    },
 
-    aboveBaseline:
-      hitRate !== null &&
-      baselineHitRate !== null &&
-      hitRate > baselineHitRate,
+    holdout: {
+      productionThreshold: production,
+      watchThreshold: watchDiagnostic,
+      evidenceSufficientForProduction: productionStable,
+      evidenceSufficientForWatch: watchEvidenceSufficient,
+      baselineHitRate: roundNumber(holdoutBaselineRate)
+    },
 
-    stable:
-      signals.length >= BACKTEST_MIN_SAMPLES &&
-      hitRate !== null &&
-      baselineHitRate !== null &&
-      hitRate > baselineHitRate,
+    developmentDiagnostics: {
+      evaluatedPositions: development.length,
+      thresholds: DIAGNOSTIC_THRESHOLDS.map(
+        (threshold) =>
+          evaluateThreshold(development, threshold)
+      ),
+      note:
+        'Development-period results are exploratory and must not be presented as holdout performance.'
+    },
+
+    overallHistoricalDiagnostics: {
+      evaluatedPositions: allEvaluations.length,
+      productionThreshold: overallProduction,
+      thresholds: DIAGNOSTIC_THRESHOLDS.map(
+        (threshold) =>
+          evaluateThreshold(allEvaluations, threshold)
+      ),
+      chronologicalSegments:
+        buildChronologicalDiagnostics(allEvaluations)
+    },
 
     thresholdDiagnostics: {
       purpose:
-        'Exploratory historical comparison only. These thresholds do not change the production signal threshold.',
+        'Exploratory comparison only. Thresholds below are not automatically promoted to production.',
 
       productionThreshold: SIGNAL_THRESHOLD,
+      watchThreshold: WATCH_THRESHOLD,
       thresholdsCompared: DIAGNOSTIC_THRESHOLDS,
 
-      comparisons: thresholdComparisons,
+      development: DIAGNOSTIC_THRESHOLDS.map(
+        (threshold) =>
+          evaluateThreshold(development, threshold)
+      ),
 
-      chronologicalSegments,
+      holdout: DIAGNOSTIC_THRESHOLDS.map(
+        (threshold) =>
+          evaluateThreshold(holdout, threshold)
+      ),
+
+      chronologicalSegments:
+        buildChronologicalDiagnostics(allEvaluations),
 
       interpretation:
-        'Compare sample counts, hit rates, coverage and baseline rates. Results may vary across historical segments and do not guarantee future outcomes.'
+        'Review sample count, hit rate, coverage, lift versus baseline, and consistency across periods. Repeatedly testing many thresholds can produce misleading apparent improvements.'
     },
 
     note:
-      'Historical test only. Results do not predict or guarantee the next multiplier.'
+      'Historical evidence only. No guaranteed next multiplier.'
   };
 }
 
@@ -944,6 +990,12 @@ function buildResponse(force = false) {
   const model = scoreAt(rows, rows.length);
   const backtest = walkForward(rows);
 
+  const productionGatePass =
+    backtest.holdout.evidenceSufficientForProduction;
+
+  const watchGatePass =
+    backtest.holdout.evidenceSufficientForWatch;
+
   const gates = [
     {
       name: 'Minimum history',
@@ -952,16 +1004,16 @@ function buildResponse(force = false) {
         `${rows.length} valid rounds; at least ${MIN_HISTORY} required.`
     },
     {
-      name: 'Backtest sample count',
+      name: 'Holdout sample count',
       pass: backtest.meetsMinimumSamples,
       detail:
-        `${backtest.samples} qualifying signals; at least ${BACKTEST_MIN_SAMPLES} required.`
+        `${backtest.samples} holdout signals at threshold ${SIGNAL_THRESHOLD}; at least ${BACKTEST_MIN_SAMPLES} required.`
     },
     {
-      name: 'Above baseline',
+      name: 'Holdout above baseline',
       pass: backtest.aboveBaseline,
       detail:
-        `Signal hit rate ${backtest.hitRate ?? 'n/a'}% vs baseline ${backtest.baselineHitRate ?? 'n/a'}%.`
+        `Holdout signal hit rate ${backtest.hitRate ?? 'n/a'}% vs holdout baseline ${backtest.baselineHitRate ?? 'n/a'}%.`
     },
     {
       name: 'Data quality',
@@ -979,11 +1031,13 @@ function buildResponse(force = false) {
 
   if (
     allGatesPass &&
+    productionGatePass &&
     model.score >= SIGNAL_THRESHOLD
   ) {
     action = 'SIGNAL';
   } else if (
     rows.length >= MIN_HISTORY &&
+    watchGatePass &&
     model.score >= WATCH_THRESHOLD
   ) {
     action = 'WATCH';
@@ -1017,7 +1071,15 @@ function buildResponse(force = false) {
       confidence: null,
       confidenceLabel: 'Evidence score, not win probability',
       target: `>= ${TARGET_MULTIPLIER.toFixed(2)}x`,
-      reasons: model.reasons
+      reasons: [
+        ...model.reasons,
+        ...(action === 'NO SIGNAL'
+          ? ['Evidence gates are not satisfied; no actionable signal is approved.']
+          : []),
+        ...(action === 'WATCH'
+          ? ['WATCH is an informational research status, not a confirmed entry or guarantee.']
+          : [])
+      ]
     },
 
     dataQuality: data.quality,
@@ -1084,7 +1146,6 @@ app.get('/api/status', (_req, res) => {
 
 app.get('/api/analyze', (_req, res) => {
   const result = buildResponse();
-
   res.status(result.ok ? 200 : 503).json(result);
 });
 
@@ -1127,12 +1188,9 @@ app.get('/api/history', (req, res) => {
     )
   );
 
-  const offset = Math.max(
-    0,
-    Math.floor(requestedOffset)
-  );
+  const offset = Math.max(0, Math.floor(requestedOffset));
 
-  const rows = data.rows
+  const rounds = data.rows
     .slice()
     .reverse()
     .slice(offset, offset + limit);
@@ -1144,13 +1202,12 @@ app.get('/api/history', (req, res) => {
     total: data.rows.length,
     limit,
     offset,
-    rounds: rows
+    rounds
   });
 });
 
 app.get('/api/reload', (_req, res) => {
   const result = buildResponse(true);
-
   res.status(result.ok ? 200 : 503).json(result);
 });
 
