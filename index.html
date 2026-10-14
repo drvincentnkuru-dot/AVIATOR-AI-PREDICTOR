@@ -3,83 +3,51 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b1220">
-  <meta name="description" content="Aviator historical evidence analysis and walk-forward backtesting dashboard.">
-  <title>AVIATOR AI PREDICTOR V1.1.1</title>
+  <meta name="theme-color" content="#0b1020">
+  <title>AVIATOR AI PREDICTOR V1.1.2</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <script defer src="script.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <p class="eyebrow">HISTORICAL ANALYSIS · WALK-FORWARD TESTING</p>
-      <h1>AVIATOR AI PREDICTOR</h1>
-      <p class="subtitle">V1.1.1 · Collect → Analyze → Backtest → Score → Signal</p>
-    </div>
-    <div class="connection"><span id="apiDot" class="dot"></span><span id="apiStatus">Checking API…</span></div>
-  </header>
-
-  <main class="container">
-    <section class="notice" role="note">
-      <strong>Research disclaimer</strong>
-      <p>Historical evidence and walk-forward analysis only. No guaranteed next multiplier. An evidence score is not a probability of winning.</p>
-    </section>
-
-    <section class="panel main-signal">
-      <div class="section-heading"><div><p class="eyebrow">CURRENT EVIDENCE</p><h2>Analysis result</h2></div><span id="version" class="pill">V1.1.1</span></div>
-      <div class="signal-grid">
-        <div id="actionCard" class="action-card no-signal"><span class="muted">Research status</span><strong id="action">LOADING</strong><span id="actionDetail">Waiting for API data</span></div>
-        <div class="metric"><span>Evidence score</span><strong id="score">—</strong><small>out of 100; not win probability</small></div>
-        <div class="metric"><span>Risk context</span><strong id="risk">—</strong><small id="riskDetail">Based on data availability</small></div>
-      </div>
-      <h3>Reasons</h3><ul id="reasons" class="reason-list"><li>Loading historical analysis…</li></ul>
-      <div class="button-row">
-        <button id="analyzeBtn" class="primary">Analyze history</button>
-        <button id="backtestBtn">Run backtest</button>
-        <button id="historyBtn">Load history</button>
-      </div>
-      <p id="updated" class="muted small">Not updated yet</p>
-    </section>
-
-    <section class="grid two-col">
-      <article class="panel"><div class="section-heading"><h2>Dataset status</h2><span id="source" class="pill">—</span></div>
-        <div class="stat-list">
-          <div><span>Valid rounds loaded</span><strong id="rounds">—</strong></div>
-          <div><span>Invalid rows skipped</span><strong id="invalid">—</strong></div>
-          <div><span>Duplicate round IDs removed</span><strong id="duplicates">—</strong></div>
-          <div><span>CSV multiplier column</span><strong id="multiplierColumn">—</strong></div>
-          <div><span>Timestamp column</span><strong id="timeColumn">—</strong></div>
-          <div><span>Round ID column</span><strong id="roundColumn">—</strong></div>
-        </div>
-        <div id="qualityWarnings" class="warning-list"></div>
-      </article>
-      <article class="panel"><h2>Multiplier distribution</h2>
-        <div class="stat-list">
-          <div><span>Mean</span><strong id="mean">—</strong></div><div><span>Median</span><strong id="median">—</strong></div>
-          <div><span>Minimum</span><strong id="min">—</strong></div><div><span>Maximum</span><strong id="max">—</strong></div>
-          <div><span>Standard deviation</span><strong id="stdev">—</strong></div><div><span>75th percentile</span><strong id="p75">—</strong></div>
-          <div><span>Rounds ≥ 2x</span><strong id="atLeast2">—</strong></div><div><span>Rounds ≥ 10x</span><strong id="atLeast10">—</strong></div>
-        </div>
-      </article>
-    </section>
-
-    <section class="panel"><h2>Recent rolling windows</h2><div class="table-wrap"><table><thead><tr><th>Window</th><th>Samples</th><th>Mean</th><th>Median</th><th>Below 1.5x</th><th>≥ 2x</th><th>≥ 5x</th><th>≥ 10x</th></tr></thead>
-      <tbody><tr><td>Short (6)</td><td id="shortSamples">—</td><td id="shortMean">—</td><td id="shortMedian">—</td><td id="shortLow">—</td><td id="shortTarget">—</td><td id="short5">—</td><td id="short10">—</td></tr>
-      <tr><td>Medium (12)</td><td id="mediumSamples">—</td><td id="mediumMean">—</td><td id="mediumMedian">—</td><td id="mediumLow">—</td><td id="mediumTarget">—</td><td id="medium5">—</td><td id="medium10">—</td></tr>
-      <tr><td>Long (24)</td><td id="longSamples">—</td><td id="longMean">—</td><td id="longMedian">—</td><td id="longLow">—</td><td id="longTarget">—</td><td id="long5">—</td><td id="long10">—</td></tr></tbody></table></div>
-      <div class="grid two-col compact"><div class="subpanel"><h3>After a low result (&lt;1.5x)</h3><p><strong id="afterLow">—</strong> next rounds ≥2x <span id="afterLowSamples" class="muted"></span></p></div><div class="subpanel"><h3>After a very low result (&lt;1.2x)</h3><p><strong id="afterVeryLow">—</strong> next rounds ≥2x <span id="afterVeryLowSamples" class="muted"></span></p></div></div>
-    </section>
-
-    <section class="panel"><div class="section-heading"><div><h2>Walk-forward backtest</h2><p class="muted small">Each tested score uses earlier rounds only; it is compared with the overall next-round ≥2x baseline.</p></div><span id="btStable" class="pill">Not tested</span></div>
-      <div class="grid metrics-grid">
-        <div class="metric"><span>Signals tested</span><strong id="btSamples">—</strong></div><div class="metric"><span>Hits (next ≥2x)</span><strong id="btHits">—</strong></div><div class="metric"><span>Misses</span><strong id="btMisses">—</strong></div><div class="metric"><span>Signal hit rate</span><strong id="btRate">—</strong></div><div class="metric"><span>Baseline hit rate</span><strong id="btBaseline">—</strong></div><div class="metric"><span>Coverage</span><strong id="btCoverage">—</strong></div><div class="metric"><span>False-signal rate</span><strong id="btFalse">—</strong></div>
-      </div><p id="btNote" class="muted small">Waiting for backtest…</p>
-    </section>
-
-    <section class="panel"><h2>Evidence gates</h2><p class="muted small">A SIGNAL is allowed only when all evidence gates pass. Otherwise the dashboard shows WATCH or NO SIGNAL.</p><ul id="gates" class="gate-list"><li>Loading gates…</li></ul></section>
-
-    <section class="panel"><div class="section-heading"><h2>Recent rounds</h2><span id="historyCount" class="pill">Not loaded</span></div><div class="table-wrap"><table><thead><tr><th>Round ID</th><th>Time (UTC)</th><th>Multiplier</th></tr></thead><tbody id="roundTable"><tr><td colspan="3">Press “Load history” to view recent rounds.</td></tr></tbody></table></div></section>
-    <footer><p>For research and statistical learning only. Crash-game outcomes may be random or independently generated. Do not treat this tool as a guaranteed betting system.</p></footer>
-  </main>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><div class="brand-mark">A</div><div><h1>AVIATOR AI PREDICTOR</h1><p>V1.1.2 · HISTORICAL RESEARCH</p></div></div>
+      <div class="status-pill"><span id="statusDot" class="dot"></span><span id="apiStatus">CONNECTING</span></div>
+    </header>
+    <main>
+      <section class="hero">
+        <div><span class="eyebrow">COLLECT · ANALYZE · BACKTEST · SCORE</span><h2>Evidence first. No forced signal.</h2><p>Reviews historical rounds, checks data quality and evaluates the scoring rule with chronological walk-forward backtesting.</p></div>
+        <button id="analyzeBtn" class="primary-btn" type="button">ANALYZE HISTORY</button>
+      </section>
+      <section id="errorBox" class="error-box hidden" role="alert"></section>
+      <section class="source-strip"><div><span class="muted">CSV SOURCE</span><strong id="sourceName">—</strong></div><div><span class="muted">VALID ROUNDS</span><strong id="roundCount">—</strong></div><div><span class="muted">LAST UPDATED</span><strong id="generatedAt">—</strong></div></section>
+      <section class="signal-card" id="signalCard">
+        <div class="section-head"><div><span class="eyebrow">CURRENT EVIDENCE STATUS</span><h2 id="signalAction">WAITING FOR DATA</h2></div><div class="score-ring"><strong id="signalScore">—</strong><span>evidence score</span></div></div>
+        <p id="signalTarget" class="muted">Target: next round ≥ 2.00x</p>
+        <p id="confidenceLabel" class="small-note">Evidence score is not a win probability.</p>
+        <ul id="signalReasons" class="reason-list"><li>Waiting for analysis.</li></ul>
+      </section>
+      <section class="grid two-col">
+        <article class="panel"><div class="panel-title"><h3>HISTORY DISTRIBUTION</h3><span id="distributionSamples">—</span></div><div class="metrics-grid">
+          <div class="metric"><span>Mean</span><strong id="meanValue">—</strong></div><div class="metric"><span>Median</span><strong id="medianValue">—</strong></div><div class="metric"><span>Minimum</span><strong id="minValue">—</strong></div><div class="metric"><span>Maximum</span><strong id="maxValue">—</strong></div><div class="metric"><span>At least 2x</span><strong id="atLeast2">—</strong></div><div class="metric"><span>At least 10x</span><strong id="atLeast10">—</strong></div>
+        </div></article>
+        <article class="panel"><div class="panel-title"><h3>RECENT WINDOWS</h3><span>Historical only</span></div><div class="table-wrap"><table><thead><tr><th>Window</th><th>Rounds</th><th>Mean</th><th>≥2x</th><th>≥5x</th></tr></thead><tbody id="windowsBody"><tr><td colspan="5">Waiting for data.</td></tr></tbody></table></div></article>
+      </section>
+      <section class="grid two-col">
+        <article class="panel"><div class="panel-title"><h3>WALK-FORWARD BACKTEST</h3><span id="backtestTarget">Target ≥ 2x</span></div><div class="metrics-grid">
+          <div class="metric"><span>Positions tested</span><strong id="testedPositions">—</strong></div><div class="metric"><span>Qualifying signals</span><strong id="btSamples">—</strong></div><div class="metric"><span>Hits / misses</span><strong id="btHitsMisses">—</strong></div><div class="metric"><span>Signal hit rate</span><strong id="btHitRate">—</strong></div><div class="metric"><span>Baseline hit rate</span><strong id="btBaseline">—</strong></div><div class="metric"><span>Signal coverage</span><strong id="btCoverage">—</strong></div>
+        </div><p id="backtestNote" class="small-note">No backtest results yet.</p></article>
+        <article class="panel"><div class="panel-title"><h3>DATA QUALITY</h3><span id="qualityStatus">—</span></div><div class="metrics-grid">
+          <div class="metric"><span>CSV data rows</span><strong id="sourceDataRows">—</strong></div><div class="metric"><span>Invalid rows skipped</span><strong id="invalidRows">—</strong></div><div class="metric"><span>Duplicate IDs removed</span><strong id="duplicateIds">—</strong></div><div class="metric"><span>Missing timestamps</span><strong id="missingTimes">—</strong></div>
+        </div><p id="columnInfo" class="small-note">Detected columns: —</p><ul id="qualityWarnings" class="warning-list"><li>Waiting for data.</li></ul></article>
+      </section>
+      <section class="panel"><div class="panel-title"><h3>EVIDENCE GATES</h3><span>All required for SIGNAL</span></div><div id="evidenceGates" class="gate-list"><p>Waiting for data.</p></div></section>
+      <section class="panel"><div class="panel-title"><h3>RECENT ROUNDS</h3><span id="recentLabel">Newest first</span></div><div class="table-wrap"><table><thead><tr><th>Round ID</th><th>Time (UTC)</th><th>Multiplier</th></tr></thead><tbody id="roundsBody"><tr><td colspan="3">Waiting for data.</td></tr></tbody></table></div></section>
+      <section class="footer-note"><strong>Important:</strong> Historical evidence and walk-forward analysis only. No guaranteed next multiplier. Aviator outcomes may be random; this tool cannot know or guarantee the next result. Use for research, not as financial advice or a promise of winnings.</section>
+    </main>
+  </div>
+  <script src="script.js" defer></script>
 </body>
 </html>
