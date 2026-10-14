@@ -6,16 +6,20 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
+app.disable('x-powered-by');
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const VERSION = 'V1.1.1';
+const VERSION = 'V1.1.2';
 const PORT = Number(process.env.PORT || 10000);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 const REQUESTED_CSV = process.env.AVIATOR_CSV_PATH
-  ? path.resolve(process.env.AVIATOR_CSV_PATH)
+  ? (path.isAbsolute(process.env.AVIATOR_CSV_PATH)
+      ? process.env.AVIATOR_CSV_PATH
+      : path.resolve(ROOT_DIR, process.env.AVIATOR_CSV_PATH))
   : null;
+
 const TARGET_MULTIPLIER = 2;
 const MIN_HISTORY = 24;
 const BACKTEST_MIN_SAMPLES = 30;
@@ -23,7 +27,10 @@ const SIGNAL_THRESHOLD = 72;
 const WATCH_THRESHOLD = 60;
 const MAX_HISTORY_RESPONSE = 10000;
 
-let cache = { file: null, mtimeMs: 0, size: 0, loadedAt: null, rows: [], quality: null, error: null };
+let cache = {
+  file: null, mtimeMs: 0, size: 0, loadedAt: null,
+  rows: [], quality: null, error: null
+};
 
 function normalizeHeader(value) {
   return String(value || '')
@@ -34,31 +41,44 @@ function normalizeHeader(value) {
     .replace(/[^a-z0-9_]/g, '');
 }
 
-// RFC-4180-style CSV row parser: handles commas and escaped quotes inside quoted fields.
 function parseCSVText(text) {
   const rows = [];
   let row = [];
   let field = '';
   let quoted = false;
   const input = String(text || '').replace(/^\uFEFF/, '');
+
   for (let i = 0; i < input.length; i += 1) {
     const ch = input[i];
     if (quoted) {
-      if (ch === '"' && input[i + 1] === '"') { field += '"'; i += 1; }
-      else if (ch === '"') quoted = false;
-      else field += ch;
-    } else if (ch === '"' && field.length === 0) quoted = true;
-    else if (ch === ',') { row.push(field); field = ''; }
-    else if (ch === '\n') {
+      if (ch === '"' && input[i + 1] === '"') {
+        field += '"';
+        i += 1;
+      } else if (ch === '"') {
+        quoted = false;
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"' && field.length === 0) {
+      quoted = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
       row.push(field.replace(/\r$/, ''));
       if (row.some((v) => String(v).trim() !== '')) rows.push(row);
-      row = []; field = '';
-    } else field += ch;
+      row = [];
+      field = '';
+    } else {
+      field += ch;
+    }
   }
+
   if (field.length || row.length) {
     row.push(field.replace(/\r$/, ''));
     if (row.some((v) => String(v).trim() !== '')) rows.push(row);
   }
+  if (quoted) throw new Error('Malformed CSV: an opening quote was not closed.');
   return rows;
 }
 
@@ -87,10 +107,12 @@ function numericMultiplier(value) {
 function parseRows(text, filePath) {
   const raw = parseCSVText(text);
   if (raw.length < 2) throw new Error('CSV is empty or has no data rows.');
+
   const headers = raw[0].map(normalizeHeader);
   const multiplierIndex = chooseColumn(headers, MULTIPLIER_HEADERS);
   const roundIndex = chooseColumn(headers, ROUND_HEADERS);
   const timeIndex = chooseColumn(headers, TIME_HEADERS);
+
   if (multiplierIndex < 0) {
     throw new Error(`Cannot find multiplier column. Found headers: ${headers.join(', ') || '(none)'}`);
   }
@@ -99,17 +121,26 @@ function parseRows(text, filePath) {
   let invalidRows = 0;
   let missingTimes = 0;
   let missingRoundIds = 0;
+
   for (let i = 1; i < raw.length; i += 1) {
     const cells = raw[i];
     const multiplier = numericMultiplier(cells[multiplierIndex]);
+
     if (!Number.isFinite(multiplier) || multiplier < 1 || multiplier > 1000000) {
       invalidRows += 1;
       continue;
     }
-    const roundId = roundIndex >= 0 ? String(cells[roundIndex] ?? '').trim() : String(i);
-    const timeUtc = timeIndex >= 0 ? String(cells[timeIndex] ?? '').trim() : '';
+
+    const roundId = roundIndex >= 0
+      ? String(cells[roundIndex] ?? '').trim()
+      : String(i);
+    const timeUtc = timeIndex >= 0
+      ? String(cells[timeIndex] ?? '').trim()
+      : '';
+
     if (!roundId) missingRoundIds += 1;
     if (!timeUtc || !Number.isFinite(Date.parse(timeUtc))) missingTimes += 1;
+
     parsed.push({
       roundId: roundId || `row-${i}`,
       timeUtc: timeUtc || null,
@@ -119,9 +150,9 @@ function parseRows(text, filePath) {
     });
   }
 
-  // Prefer numeric round IDs when the entire usable set has numeric IDs; otherwise use timestamps
-  // where available and retain source order for rows without a parseable timestamp.
-  const allNumericIds = parsed.length > 0 && parsed.every((r) => /^\d+(?:\.\d+)?$/.test(r.roundId));
+  const allNumericIds = parsed.length > 0 &&
+    parsed.every((r) => /^\d+(?:\.\d+)?$/.test(r.roundId));
+
   if (allNumericIds) {
     parsed.sort((a, b) => Number(a.roundId) - Number(b.roundId) || a.sourceRow - b.sourceRow);
   } else {
@@ -137,11 +168,16 @@ function parseRows(text, filePath) {
   const seenIds = new Set();
   const deduped = [];
   let duplicateIds = 0;
+
   for (const r of parsed) {
-    if (r.roundId && seenIds.has(r.roundId)) { duplicateIds += 1; continue; }
+    if (r.roundId && seenIds.has(r.roundId)) {
+      duplicateIds += 1;
+      continue;
+    }
     if (r.roundId) seenIds.add(r.roundId);
     deduped.push(r);
   }
+
   if (!deduped.length) throw new Error('No valid multiplier rows were found in this CSV.');
 
   const quality = {
@@ -157,81 +193,139 @@ function parseRows(text, filePath) {
     duplicateRoundIds: duplicateIds,
     missingTimestamps: missingTimes,
     missingRoundIds,
-    orderMethod: allNumericIds ? 'numeric round_id ascending' : 'timestamp ascending where available; source order fallback',
+    orderMethod: allNumericIds
+      ? 'numeric round_id ascending'
+      : 'timestamp ascending where available; source order fallback',
     firstRound: deduped[0]?.roundId ?? null,
     lastRound: deduped[deduped.length - 1]?.roundId ?? null,
     warnings: []
   };
-  if (invalidRows) quality.warnings.push(`${invalidRows} row(s) were skipped because multiplier was invalid or below 1.00x.`);
-  if (duplicateIds) quality.warnings.push(`${duplicateIds} duplicate round ID(s) were removed; first occurrence after ordering was kept.`);
-  if (missingTimes) quality.warnings.push(`${missingTimes} row(s) have missing/unparseable timestamps; multiplier analysis can still use them.`);
+
+  if (invalidRows) quality.warnings.push(`${invalidRows} row(s) skipped because multiplier was invalid or outside 1.00x–1000000x.`);
+  if (duplicateIds) quality.warnings.push(`${duplicateIds} duplicate round ID(s) removed.`);
+  if (missingTimes) quality.warnings.push(`${missingTimes} row(s) have missing/unparseable timestamps.`);
   if (roundIndex < 0) quality.warnings.push('No recognized round ID column; source row numbers were used as IDs.');
+  if (timeIndex < 0 && !allNumericIds) {
+    quality.warnings.push('No recognized timestamp column; CSV source order is being used where needed.');
+  }
+
   return { rows: deduped, quality };
 }
 
 function candidateCSVFiles() {
   if (REQUESTED_CSV) return [REQUESTED_CSV];
+
   const preferred = [
-    // Prefer the full research export over the original 58-round seed file.
     path.join(DATA_DIR, 'aviator-2026-10 (1).csv'),
     path.join(DATA_DIR, 'aviator-2026-10.csv'),
     path.join(DATA_DIR, 'aviator_rounds.csv')
   ];
-  const existingPreferred = preferred.filter((p) => fs.existsSync(p) && fs.statSync(p).isFile());
-  if (existingPreferred.length) return existingPreferred;
+
   if (!fs.existsSync(DATA_DIR)) return [];
-  return fs.readdirSync(DATA_DIR)
+
+  const existingPreferred = preferred.filter((p) => {
+    try { return fs.existsSync(p) && fs.statSync(p).isFile(); }
+    catch (_) { return false; }
+  });
+  const preferredSet = new Set(existingPreferred.map((p) => path.resolve(p)));
+  const remaining = fs.readdirSync(DATA_DIR)
     .filter((name) => name.toLowerCase().endsWith('.csv'))
     .sort((a, b) => a.localeCompare(b))
-    .map((name) => path.join(DATA_DIR, name));
+    .map((name) => path.join(DATA_DIR, name))
+    .filter((p) => !preferredSet.has(path.resolve(p)));
+
+  // Prefer the full research export, but try other CSVs if a preferred file is invalid.
+  return [...existingPreferred, ...remaining];
 }
 
 function loadData(force = false) {
   const files = candidateCSVFiles();
+
   if (!files.length) {
-    cache = { file: null, mtimeMs: 0, size: 0, loadedAt: new Date().toISOString(), rows: [], quality: null,
-      error: `No CSV file found in ${DATA_DIR}. Upload the full history CSV into the repository's data/ folder.` };
+    cache = {
+      file: null, mtimeMs: 0, size: 0, loadedAt: new Date().toISOString(),
+      rows: [], quality: null,
+      error: `No CSV file found in ${DATA_DIR}. Put the full history CSV in the repository data/ folder.`
+    };
     return cache;
   }
 
   let lastError = null;
+
   for (const file of files) {
     try {
       if (!fs.existsSync(file)) throw new Error(`CSV file does not exist: ${file}`);
       const stat = fs.statSync(file);
-      if (!force && cache.file === file && cache.mtimeMs === stat.mtimeMs && cache.size === stat.size && cache.rows.length) return cache;
+
+      if (!force && cache.file === file && cache.mtimeMs === stat.mtimeMs &&
+          cache.size === stat.size && cache.rows.length) {
+        return cache;
+      }
+
       const parsed = parseRows(fs.readFileSync(file, 'utf8'), file);
-      cache = { file, mtimeMs: stat.mtimeMs, size: stat.size, loadedAt: new Date().toISOString(), rows: parsed.rows, quality: parsed.quality, error: null };
+      cache = {
+        file,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        loadedAt: new Date().toISOString(),
+        rows: parsed.rows,
+        quality: parsed.quality,
+        error: null
+      };
       return cache;
-    } catch (err) { lastError = err; }
+    } catch (err) {
+      lastError = err;
+    }
   }
-  cache = { file: files[0] || null, mtimeMs: 0, size: 0, loadedAt: new Date().toISOString(), rows: [], quality: null,
-    error: lastError ? lastError.message : 'Unable to load CSV.' };
+
+  cache = {
+    file: files[0] || null, mtimeMs: 0, size: 0,
+    loadedAt: new Date().toISOString(), rows: [], quality: null,
+    error: lastError ? lastError.message : 'Unable to load CSV.'
+  };
   return cache;
 }
 
-function mean(values) { return values.length ? values.reduce((s, n) => s + n, 0) / values.length : null; }
+function mean(values) {
+  return values.length ? values.reduce((sum, n) => sum + n, 0) / values.length : null;
+}
 function median(values) {
   if (!values.length) return null;
-  const s = [...values].sort((a, b) => a - b); const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 function stddev(values) {
   if (values.length < 2) return 0;
-  const m = mean(values); return Math.sqrt(mean(values.map((x) => (x - m) ** 2)));
+  const average = mean(values);
+  return Math.sqrt(mean(values.map((x) => (x - average) ** 2)));
 }
-function rate(values, predicate) { return values.length ? 100 * values.filter(predicate).length / values.length : null; }
+function rate(values, predicate) {
+  return values.length ? 100 * values.filter(predicate).length / values.length : null;
+}
 function longestStreak(values, predicate) {
-  let best = 0, current = 0;
-  for (const v of values) { if (predicate(v)) { current += 1; best = Math.max(best, current); } else current = 0; }
+  let best = 0;
+  let current = 0;
+  for (const value of values) {
+    if (predicate(value)) {
+      current += 1;
+      best = Math.max(best, current);
+    } else {
+      current = 0;
+    }
+  }
   return best;
 }
-function roundNumber(n, digits = 2) { return n == null || !Number.isFinite(n) ? null : Number(n.toFixed(digits)); }
+function roundNumber(n, digits = 2) {
+  return n == null || !Number.isFinite(n) ? null : Number(n.toFixed(digits));
+}
+
 function summarize(values) {
   const sorted = [...values].sort((a, b) => a - b);
   return {
     samples: values.length,
-    mean: roundNumber(mean(values)), median: roundNumber(median(values)),
+    mean: roundNumber(mean(values)),
+    median: roundNumber(median(values)),
     min: values.length ? roundNumber(sorted[0]) : null,
     max: values.length ? roundNumber(sorted[sorted.length - 1]) : null,
     stdev: roundNumber(stddev(values)),
@@ -246,109 +340,258 @@ function summarize(values) {
     longestBelow1_5: longestStreak(values, (v) => v < 1.5)
   };
 }
+
 function windowSummary(rows, size) {
   const values = rows.slice(-size).map((r) => r.multiplier);
   return { window: size, ...summarize(values) };
 }
+
 function transitionRate(rows, condition) {
-  let eligible = 0, targetHits = 0;
+  let eligible = 0;
+  let targetHits = 0;
   for (let i = 0; i < rows.length - 1; i += 1) {
-    if (condition(rows[i].multiplier)) { eligible += 1; if (rows[i + 1].multiplier >= TARGET_MULTIPLIER) targetHits += 1; }
+    if (condition(rows[i].multiplier)) {
+      eligible += 1;
+      if (rows[i + 1].multiplier >= TARGET_MULTIPLIER) targetHits += 1;
+    }
   }
-  return { samples: eligible, hits: targetHits, hitRate: eligible ? roundNumber(100 * targetHits / eligible) : null };
+  return {
+    samples: eligible,
+    hits: targetHits,
+    hitRate: eligible ? roundNumber(100 * targetHits / eligible) : null
+  };
 }
 
-// Score only summarizes historical context. It is not a probability that the next round will win.
+// This is a historical evidence score, not a win probability.
 function scoreAt(rows, endIndex) {
-  if (endIndex < MIN_HISTORY) return { score: 0, reasons: ['Not enough prior rounds for scoring.'], features: {} };
+  if (endIndex < MIN_HISTORY) {
+    return { score: 0, reasons: ['Not enough prior rounds for scoring.'], features: {} };
+  }
+
   const prior = rows.slice(0, endIndex).map((r) => r.multiplier);
   const last = prior[prior.length - 1];
-  const w6 = prior.slice(-6), w12 = prior.slice(-12), w24 = prior.slice(-24);
-  const r6 = rate(w6, (v) => v >= TARGET_MULTIPLIER) || 0;
-  const r12 = rate(w12, (v) => v >= TARGET_MULTIPLIER) || 0;
-  const r24 = rate(w24, (v) => v >= TARGET_MULTIPLIER) || 0;
-  const lowStreak = longestStreak(prior.slice(-6), (v) => v < 1.5);
-  const recentMean = mean(w6) || 0;
+  const w6 = prior.slice(-6);
+  const w12 = prior.slice(-12);
+  const w24 = prior.slice(-24);
+
+  const r6 = rate(w6, (v) => v >= TARGET_MULTIPLIER) ?? 0;
+  const r12 = rate(w12, (v) => v >= TARGET_MULTIPLIER) ?? 0;
+  const r24 = rate(w24, (v) => v >= TARGET_MULTIPLIER) ?? 0;
+  const lowStreak = longestStreak(w6, (v) => v < 1.5);
+  const recentMean = mean(w6) ?? 0;
+
   let score = 50;
   const reasons = [];
+
   score += Math.max(-12, Math.min(12, (r6 - r24) * 0.24));
   score += Math.max(-8, Math.min(8, (r12 - r24) * 0.12));
-  if (r6 >= r24 + 15) reasons.push('Recent >=2x rate is above the 24-round historical window.');
-  else if (r6 <= r24 - 15) reasons.push('Recent >=2x rate is below the 24-round historical window.');
-  if (last >= 10) { score -= 8; reasons.push('Last multiplier was very high; the score avoids chasing a large recent result.'); }
-  else if (last >= 5) { score -= 4; reasons.push('Last multiplier was elevated; a cautious adjustment is applied.'); }
-  if (lowStreak >= 3) { score -= Math.min(12, lowStreak * 2); reasons.push(`A low-multiplier streak of ${lowStreak} appears in the latest six rounds.`); }
-  if (recentMean > 0 && recentMean < 1.8) { score -= 3; reasons.push('The latest six-round mean is low.'); }
-  if (recentMean >= 3 && r6 >= r24) { score += 3; reasons.push('Recent mean and >=2x rate are both comparatively elevated.'); }
+
+  if (r6 >= r24 + 15) reasons.push('Recent >=2x rate is above the 24-round reference window.');
+  else if (r6 <= r24 - 15) reasons.push('Recent >=2x rate is below the 24-round reference window.');
+
+  if (last >= 10) {
+    score -= 8;
+    reasons.push('The latest multiplier was very high; a caution adjustment was applied.');
+  } else if (last >= 5) {
+    score -= 4;
+    reasons.push('The latest multiplier was elevated; a caution adjustment was applied.');
+  }
+
+  if (lowStreak >= 3) {
+    score -= Math.min(12, lowStreak * 2);
+    reasons.push(`A low-multiplier streak of ${lowStreak} appears in the latest six rounds.`);
+  }
+  if (recentMean > 0 && recentMean < 1.8) {
+    score -= 3;
+    reasons.push('The latest six-round mean is low.');
+  }
+  if (recentMean >= 3 && r6 >= r24) {
+    score += 3;
+    reasons.push('Recent mean and >=2x rate are comparatively elevated.');
+  }
+
   score = Math.max(0, Math.min(100, Math.round(score)));
-  if (!reasons.length) reasons.push('Recent windows do not show a strong difference from the longer reference window.');
-  return { score, reasons, features: { lastMultiplier: last, rate2x6: roundNumber(r6), rate2x12: roundNumber(r12), rate2x24: roundNumber(r24), recentMean6: roundNumber(recentMean), lowStreak6: lowStreak } };
+  if (!reasons.length) reasons.push('Recent windows do not show a strong difference from the reference window.');
+
+  return {
+    score,
+    reasons,
+    features: {
+      lastMultiplier: last,
+      rate2x6: roundNumber(r6),
+      rate2x12: roundNumber(r12),
+      rate2x24: roundNumber(r24),
+      recentMean6: roundNumber(recentMean),
+      lowStreak6: lowStreak
+    }
+  };
 }
 
 function walkForward(rows) {
-  const baselineRows = rows.slice(MIN_HISTORY + 1).map((r) => r.multiplier);
-  const baselineHits = baselineRows.filter((v) => v >= TARGET_MULTIPLIER).length;
+  // The baseline uses exactly the same evaluated next-round positions as the model.
+  const evaluatedNextRounds = [];
   const signals = [];
+  const scoreCounts = {
+    below50: 0,
+    from50to59: 0,
+    from60to71: 0,
+    from72to77: 0,
+    from78to100: 0
+  };
+  let scoreSum = 0;
+  let minScore = null;
+  let maxScore = null;
+
   for (let i = MIN_HISTORY; i < rows.length - 1; i += 1) {
     const model = scoreAt(rows, i);
     const actualNext = rows[i + 1].multiplier;
-    if (model.score >= SIGNAL_THRESHOLD) {
-      signals.push({ score: model.score, hit: actualNext >= TARGET_MULTIPLIER, actualNext, roundId: rows[i].roundId });
+    evaluatedNextRounds.push(actualNext);
+
+    const score = model.score;
+    scoreSum += score;
+    minScore = minScore === null ? score : Math.min(minScore, score);
+    maxScore = maxScore === null ? score : Math.max(maxScore, score);
+
+    if (score < 50) scoreCounts.below50 += 1;
+    else if (score < 60) scoreCounts.from50to59 += 1;
+    else if (score < SIGNAL_THRESHOLD) scoreCounts.from60to71 += 1;
+    else if (score < 78) scoreCounts.from72to77 += 1;
+    else scoreCounts.from78to100 += 1;
+
+    if (score >= SIGNAL_THRESHOLD) {
+      signals.push({
+        score,
+        hit: actualNext >= TARGET_MULTIPLIER,
+        actualNext,
+        roundId: rows[i].roundId
+      });
     }
   }
+
   const hits = signals.filter((s) => s.hit).length;
   const misses = signals.length - hits;
-  const testedPositions = Math.max(0, rows.length - MIN_HISTORY - 1);
+  const testedPositions = evaluatedNextRounds.length;
   const hitRate = signals.length ? 100 * hits / signals.length : null;
   const coverage = testedPositions ? 100 * signals.length / testedPositions : 0;
-  const baselineHitRate = baselineRows.length ? 100 * baselineHits / baselineRows.length : null;
+  const baselineHits = evaluatedNextRounds.filter((v) => v >= TARGET_MULTIPLIER).length;
+  const baselineHitRate = testedPositions ? 100 * baselineHits / testedPositions : null;
+
   return {
     target: `next round >= ${TARGET_MULTIPLIER.toFixed(2)}x`,
-    method: 'Chronological walk-forward: each score uses only rounds before the evaluated next round.',
-    minHistory: MIN_HISTORY, testedPositions, samples: signals.length, hits, misses,
-    hitRate: roundNumber(hitRate), coverage: roundNumber(coverage),
-    baselineSamples: baselineRows.length, baselineHits,
+    method: 'Chronological walk-forward: each score uses only prior rounds; baseline uses the same evaluated positions.',
+    minHistory: MIN_HISTORY,
+    testedPositions,
+    scoreDiagnostics: {
+      minScore,
+      maxScore,
+      averageScore: testedPositions ? roundNumber(scoreSum / testedPositions) : null,
+      scoreCounts,
+      threshold: SIGNAL_THRESHOLD
+    },
+    samples: signals.length,
+    hits,
+    misses,
+    hitRate: roundNumber(hitRate),
+    coverage: roundNumber(coverage),
+    baselineSamples: testedPositions,
+    baselineHits,
     baselineHitRate: roundNumber(baselineHitRate),
     falseSignalRate: signals.length ? roundNumber(100 * misses / signals.length) : null,
     meetsMinimumSamples: signals.length >= BACKTEST_MIN_SAMPLES,
-    aboveBaseline: hitRate != null && baselineHitRate != null ? hitRate > baselineHitRate : false,
-    stable: signals.length >= BACKTEST_MIN_SAMPLES && hitRate != null && baselineHitRate != null && hitRate > baselineHitRate,
+    aboveBaseline: hitRate !== null && baselineHitRate !== null && hitRate > baselineHitRate,
+    stable: signals.length >= BACKTEST_MIN_SAMPLES &&
+      hitRate !== null && baselineHitRate !== null && hitRate > baselineHitRate,
     note: 'Historical test only. Results do not predict or guarantee the next multiplier.'
   };
 }
 
 function buildResponse(force = false) {
   const data = loadData(force);
+
   if (!data.rows.length) {
-    return { ok: false, version: VERSION, error: data.error || 'No valid data loaded.', source: data.file ? path.basename(data.file) : null, generatedAt: new Date().toISOString() };
+    return {
+      ok: false,
+      version: VERSION,
+      error: data.error || 'No valid data loaded.',
+      source: data.file ? path.basename(data.file) : null,
+      generatedAt: new Date().toISOString()
+    };
   }
+
   const rows = data.rows;
   const values = rows.map((r) => r.multiplier);
   const last = rows[rows.length - 1];
   const model = scoreAt(rows, rows.length);
   const backtest = walkForward(rows);
+
   const gates = [
-    { name: 'Minimum history', pass: rows.length >= MIN_HISTORY, detail: `${rows.length} valid rounds; at least ${MIN_HISTORY} required.` },
-    { name: 'Backtest sample count', pass: backtest.meetsMinimumSamples, detail: `${backtest.samples} qualifying signals; at least ${BACKTEST_MIN_SAMPLES} required.` },
-    { name: 'Above baseline', pass: backtest.aboveBaseline, detail: `Signal hit rate ${backtest.hitRate ?? 'n/a'}% vs baseline ${backtest.baselineHitRate ?? 'n/a'}%.` },
-    { name: 'Data quality', pass: data.quality.validRounds >= MIN_HISTORY && data.quality.duplicateRoundIds === 0, detail: `${data.quality.validRounds} valid rounds; ${data.quality.duplicateRoundIds} duplicate IDs removed.` }
+    {
+      name: 'Minimum history',
+      pass: rows.length >= MIN_HISTORY,
+      detail: `${rows.length} valid rounds; at least ${MIN_HISTORY} required.`
+    },
+    {
+      name: 'Backtest sample count',
+      pass: backtest.meetsMinimumSamples,
+      detail: `${backtest.samples} qualifying signals; at least ${BACKTEST_MIN_SAMPLES} required.`
+    },
+    {
+      name: 'Above baseline',
+      pass: backtest.aboveBaseline,
+      detail: `Signal hit rate ${backtest.hitRate ?? 'n/a'}% vs baseline ${backtest.baselineHitRate ?? 'n/a'}%.`
+    },
+    {
+      name: 'Data quality',
+      pass: data.quality.validRounds >= MIN_HISTORY && data.quality.duplicateRoundIds === 0,
+      detail: `${data.quality.validRounds} valid rounds; ${data.quality.duplicateRoundIds} duplicate IDs removed.`
+    }
   ];
-  const allGatesPass = gates.every((g) => g.pass);
+
+  const allGatesPass = gates.every((gate) => gate.pass);
   let action = 'NO SIGNAL';
+
   if (allGatesPass && model.score >= SIGNAL_THRESHOLD) action = 'SIGNAL';
   else if (rows.length >= MIN_HISTORY && model.score >= WATCH_THRESHOLD) action = 'WATCH';
+
   const distribution = summarize(values);
+
   return {
-    ok: true, version: VERSION, generatedAt: new Date().toISOString(),
+    ok: true,
+    version: VERSION,
+    generatedAt: new Date().toISOString(),
     disclaimer: 'Historical evidence and walk-forward analysis only. No guaranteed next multiplier.',
-    source: path.basename(data.file), sourcePath: path.relative(ROOT_DIR, data.file),
-    summary: { samples: rows.length, previous: rows.length > 1 ? rows[rows.length - 2] : null, latest: last, nextRound: null },
-    signal: { action, score: model.score, confidence: null, confidenceLabel: 'Evidence score, not win probability', target: `>= ${TARGET_MULTIPLIER.toFixed(2)}x`, reasons: model.reasons },
+    source: path.basename(data.file),
+    sourcePath: path.relative(ROOT_DIR, data.file),
+    summary: {
+      samples: rows.length,
+      previous: rows.length > 1 ? rows[rows.length - 2] : null,
+      latest: last,
+      nextRound: null
+    },
+    signal: {
+      action,
+      score: model.score,
+      confidence: null,
+      confidenceLabel: 'Evidence score, not win probability',
+      target: `>= ${TARGET_MULTIPLIER.toFixed(2)}x`,
+      reasons: model.reasons
+    },
     dataQuality: data.quality,
     distribution,
-    windows: { short: windowSummary(rows, 6), medium: windowSummary(rows, 12), long: windowSummary(rows, 24) },
-    transitions: { afterLow: transitionRate(rows, (v) => v < 1.5), afterVeryLow: transitionRate(rows, (v) => v < 1.2) },
-    regime: { latest6Mean: roundNumber(mean(values.slice(-6))), latest12Mean: roundNumber(mean(values.slice(-12))), latest24Mean: roundNumber(mean(values.slice(-24))) },
+    windows: {
+      short: windowSummary(rows, 6),
+      medium: windowSummary(rows, 12),
+      long: windowSummary(rows, 24)
+    },
+    transitions: {
+      afterLow: transitionRate(rows, (v) => v < 1.5),
+      afterVeryLow: transitionRate(rows, (v) => v < 1.2)
+    },
+    regime: {
+      latest6Mean: roundNumber(mean(values.slice(-6))),
+      latest12Mean: roundNumber(mean(values.slice(-12))),
+      latest24Mean: roundNumber(mean(values.slice(-24)))
+    },
     features: model.features,
     backtest,
     evidenceGates: gates,
@@ -356,40 +599,86 @@ function buildResponse(force = false) {
   };
 }
 
-app.get('/', (_req, res) => res.json({ ok: true, name: 'AVIATOR AI PREDICTOR', version: VERSION,
-  message: 'Use /api/analyze, /api/history, /api/status or /api/backtest.' }));
+app.get('/', (_req, res) => {
+  res.json({
+    ok: true,
+    name: 'AVIATOR AI PREDICTOR',
+    version: VERSION,
+    message: 'Use /api/analyze, /api/history, /api/status or /api/backtest.'
+  });
+});
+
 app.get('/api/status', (_req, res) => {
   const data = loadData();
-  res.json({ ok: data.rows.length > 0, version: VERSION, source: data.file ? path.basename(data.file) : null,
-    sourcePath: data.file ? path.relative(ROOT_DIR, data.file) : null, loadedAt: data.loadedAt,
-    rounds: data.rows.length, dataQuality: data.quality, error: data.error,
-    csvPathOverrideSet: Boolean(REQUESTED_CSV), generatedAt: new Date().toISOString() });
+  res.json({
+    ok: data.rows.length > 0,
+    version: VERSION,
+    source: data.file ? path.basename(data.file) : null,
+    sourcePath: data.file ? path.relative(ROOT_DIR, data.file) : null,
+    loadedAt: data.loadedAt,
+    rounds: data.rows.length,
+    dataQuality: data.quality,
+    error: data.error,
+    csvPathOverrideSet: Boolean(REQUESTED_CSV),
+    generatedAt: new Date().toISOString()
+  });
 });
+
 app.get('/api/analyze', (_req, res) => {
   const result = buildResponse();
   res.status(result.ok ? 200 : 503).json(result);
 });
+
 app.get('/api/backtest', (_req, res) => {
   const result = buildResponse();
   if (!result.ok) return res.status(503).json(result);
-  return res.json({ ok: true, version: VERSION, generatedAt: result.generatedAt, source: result.source,
-    backtest: result.backtest, evidenceGates: result.evidenceGates, disclaimer: result.disclaimer });
+
+  return res.json({
+    ok: true,
+    version: VERSION,
+    generatedAt: result.generatedAt,
+    source: result.source,
+    backtest: result.backtest,
+    evidenceGates: result.evidenceGates,
+    disclaimer: result.disclaimer
+  });
 });
+
 app.get('/api/history', (req, res) => {
   const data = loadData();
   if (!data.rows.length) return res.status(503).json({ ok: false, error: data.error });
-  const limit = Math.max(1, Math.min(MAX_HISTORY_RESPONSE, Number(req.query.limit) || 100));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
+
+  const requestedLimit = Number(req.query.limit) || 100;
+  const requestedOffset = Number(req.query.offset) || 0;
+  const limit = Math.max(1, Math.min(MAX_HISTORY_RESPONSE, Math.floor(requestedLimit)));
+  const offset = Math.max(0, Math.floor(requestedOffset));
   const rows = data.rows.slice().reverse().slice(offset, offset + limit);
-  return res.json({ ok: true, version: VERSION, source: path.basename(data.file), total: data.rows.length,
-    limit, offset, rounds: rows });
+
+  return res.json({
+    ok: true,
+    version: VERSION,
+    source: path.basename(data.file),
+    total: data.rows.length,
+    limit,
+    offset,
+    rounds: rows
+  });
 });
+
 app.get('/api/reload', (_req, res) => {
   const result = buildResponse(true);
   res.status(result.ok ? 200 : 503).json(result);
 });
+
 app.use((err, _req, res, _next) => {
   console.error('Unhandled request error:', err);
-  res.status(500).json({ ok: false, version: VERSION, error: 'Internal server error.' });
+  res.status(500).json({
+    ok: false,
+    version: VERSION,
+    error: 'Internal server error.'
+  });
 });
-app.listen(PORT, '0.0.0.0', () => console.log(`AVIATOR AI PREDICTOR ${VERSION} listening on ${PORT}`));
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`AVIATOR AI PREDICTOR ${VERSION} listening on ${PORT}`);
+});
