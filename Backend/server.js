@@ -1,4 +1,3 @@
-
 'use strict';
 
 const express = require('express');
@@ -7,42 +6,30 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-app.disable('x-powered-by');
+
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const VERSION = 'V1.1.4';
+const VERSION = 'V1.1.5';
 const PORT = Number(process.env.PORT || 10000);
+
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
-
-const REQUESTED_CSV = process.env.AVIATOR_CSV_PATH
-  ? (path.isAbsolute(process.env.AVIATOR_CSV_PATH)
-      ? process.env.AVIATOR_CSV_PATH
-      : path.resolve(ROOT_DIR, process.env.AVIATOR_CSV_PATH))
-  : null;
 
 const TARGET_MULTIPLIER = 2;
 const MIN_HISTORY = 24;
 const BACKTEST_MIN_SAMPLES = 30;
 
-// Keep production thresholds unchanged.
 const SIGNAL_THRESHOLD = 72;
 const WATCH_THRESHOLD = 60;
 const MAX_HISTORY_RESPONSE = 10000;
 
-// Exploratory only; never automatically select a production threshold.
 const DIAGNOSTIC_THRESHOLDS = [50, 55, 60, 65, 68, 72];
-const CHRONOLOGICAL_SEGMENTS = 4;
 
-// The latest 30% of chronological evaluations is reserved
-// as a holdout period. It is not used to select a threshold.
-const HOLDOUT_FRACTION = 0.30;
-
-let cache = {
+const CACHE = {
   file: null,
-  mtimeMs: 0,
-  size: 0,
+  mtimeMs: null,
+  size: null,
   loadedAt: null,
   rows: [],
   quality: null,
@@ -54,404 +41,327 @@ function normalizeHeader(value) {
     .replace(/^\uFEFF/, '')
     .trim()
     .toLowerCase()
-    .replace(/[\s\-./]+/g, '_')
-    .replace(/[^a-z0-9_]/g, '');
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
 }
 
-function parseCSVText(text) {
-  const rows = [];
-  let row = [];
-  let field = '';
+function parseCsvLine(line) {
+  const output = [];
+  let cell = '';
   let quoted = false;
 
-  const input = String(text || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
 
-  for (let i = 0; i < input.length; i += 1) {
-    const ch = input[i];
-
-    if (quoted) {
-      if (ch === '"' && input[i + 1] === '"') {
-        field += '"';
-        i += 1;
-      } else if (ch === '"') {
-        quoted = false;
+    if (char === '"') {
+      if (quoted && line[i + 1] === '"') {
+        cell += '"';
+        i++;
       } else {
-        field += ch;
+        quoted = !quoted;
       }
-    } else if (ch === '"' && field.length === 0) {
-      quoted = true;
-    } else if (ch === ',') {
-      row.push(field);
-      field = '';
-    } else if (ch === '\n') {
-      row.push(field.replace(/\r$/, ''));
-
-      if (row.some((v) => String(v).trim() !== '')) {
-        rows.push(row);
-      }
-
-      row = [];
-      field = '';
+    } else if (char === ',' && !quoted) {
+      output.push(cell);
+      cell = '';
     } else {
-      field += ch;
+      cell += char;
     }
   }
 
-  if (field.length || row.length) {
-    row.push(field.replace(/\r$/, ''));
-
-    if (row.some((v) => String(v).trim() !== '')) {
-      rows.push(row);
-    }
-  }
-
-  if (quoted) {
-    throw new Error(
-      'Malformed CSV: an opening quote was not closed.'
-    );
-  }
-
-  return rows;
+  output.push(cell);
+  return output;
 }
 
-const MULTIPLIER_HEADERS = [
-  'crash_multiplier',
-  'multiplier',
-  'crash',
-  'crashpoint',
-  'crash_point',
-  'value',
-  'coefficient',
-  'result',
-  'x',
-  'outcome'
-];
-
-const ROUND_HEADERS = [
-  'round_id',
-  'round',
-  'roundid',
-  'game_id',
-  'id',
-  'round_number'
-];
-
-const TIME_HEADERS = [
-  'time_utc',
-  'timestamp',
-  'time',
-  'date',
-  'datetime',
-  'created_at',
-  'createdat'
-];
-
-function chooseColumn(headers, candidates) {
-  for (const candidate of candidates) {
-    const index = headers.indexOf(candidate);
-    if (index >= 0) return index;
-  }
-
-  return -1;
-}
-
-function numericMultiplier(value) {
-  const cleaned = String(value ?? '')
+function parseMultiplier(raw) {
+  const text = String(raw ?? '')
     .trim()
-    .replace(/x$/i, '')
-    .replace(/,/g, '.');
+    .replace(/[xX]$/, '')
+    .replace(/\s/g, '')
+    .replace(',', '.');
 
-  if (!cleaned) return NaN;
+  if (!text) return null;
 
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : NaN;
-}
+  const number = Number(text);
 
-function parseRows(text, filePath) {
-  const raw = parseCSVText(text);
-
-  if (raw.length < 2) {
-    throw new Error('CSV is empty or has no data rows.');
+  if (
+    !Number.isFinite(number) ||
+    number < 1 ||
+    number > 1000000
+  ) {
+    return null;
   }
 
-  const headers = raw[0].map(normalizeHeader);
+  return Math.round(number * 10000) / 10000;
+}
 
-  const multiplierIndex = chooseColumn(
-    headers,
-    MULTIPLIER_HEADERS
-  );
+function parseCsv(csvText) {
+  const lines = String(csvText)
+    .replace(/^\uFEFF/, '')
+    .split(/\r?\n/)
+    .filter(line => line.trim().length > 0);
 
-  const roundIndex = chooseColumn(headers, ROUND_HEADERS);
-  const timeIndex = chooseColumn(headers, TIME_HEADERS);
+  if (lines.length < 2) {
+    throw new Error('CSV has no data rows.');
+  }
+
+  const headers = parseCsvLine(lines[0]).map(normalizeHeader);
+
+  const findColumn = aliases =>
+    headers.findIndex(header => aliases.includes(header));
+
+  const multiplierIndex = findColumn([
+    'crash_multiplier',
+    'multiplier',
+    'crash',
+    'crashpoint',
+    'crash_point',
+    'value',
+    'coefficient',
+    'result',
+    'x',
+    'outcome'
+  ]);
+
+  const roundIdIndex = findColumn([
+    'round_id',
+    'round',
+    'roundid',
+    'game_id',
+    'id',
+    'round_number'
+  ]);
+
+  const timeIndex = findColumn([
+    'time_utc',
+    'timestamp',
+    'time',
+    'date',
+    'datetime',
+    'created_at',
+    'createdat'
+  ]);
 
   if (multiplierIndex < 0) {
-    throw new Error(
-      `Cannot find multiplier column. Found headers: ${
-        headers.join(', ') || '(none)'
-      }`
-    );
+    throw new Error('Could not identify the multiplier column.');
   }
 
-  const parsed = [];
+  const rows = [];
+
   let invalidRows = 0;
-  let missingTimes = 0;
+  let missingTimestamps = 0;
   let missingRoundIds = 0;
 
-  for (let i = 1; i < raw.length; i += 1) {
-    const cells = raw[i];
-    const multiplier = numericMultiplier(
-      cells[multiplierIndex]
-    );
+  for (let i = 1; i < lines.length; i++) {
+    const cells = parseCsvLine(lines[i]);
+    const multiplier = parseMultiplier(cells[multiplierIndex]);
 
-    if (
-      !Number.isFinite(multiplier) ||
-      multiplier < 1 ||
-      multiplier > 1000000
-    ) {
-      invalidRows += 1;
+    if (multiplier === null) {
+      invalidRows++;
       continue;
     }
 
-    const roundId = roundIndex >= 0
-      ? String(cells[roundIndex] ?? '').trim()
-      : String(i);
+    const rawId = roundIdIndex >= 0
+      ? String(cells[roundIdIndex] ?? '').trim()
+      : '';
 
-    const timeUtc = timeIndex >= 0
+    const rawTime = timeIndex >= 0
       ? String(cells[timeIndex] ?? '').trim()
       : '';
 
-    if (!roundId) missingRoundIds += 1;
+    if (!rawId) missingRoundIds++;
 
-    if (!timeUtc || !Number.isFinite(Date.parse(timeUtc))) {
-      missingTimes += 1;
+    const parsedTime = rawTime ? Date.parse(rawTime) : NaN;
+
+    if (!Number.isFinite(parsedTime)) {
+      missingTimestamps++;
     }
 
-    parsed.push({
-      roundId: roundId || `row-${i}`,
-      timeUtc: timeUtc || null,
-      multiplier: Number(multiplier.toFixed(4)),
-      sourceRow: i + 1,
-      sourceFile: path.basename(filePath)
+    rows.push({
+      roundId: rawId || String(i),
+      time: rawTime || null,
+      timeMs: Number.isFinite(parsedTime) ? parsedTime : null,
+      multiplier,
+      sourceLine: i + 1
     });
   }
 
-  const allNumericIds = parsed.length > 0 &&
-    parsed.every((r) => /^\d+(?:\.\d+)?$/.test(r.roundId));
+  const allNumericIds =
+    rows.length > 0 &&
+    rows.every(row => /^\d+$/.test(row.roundId));
 
   if (allNumericIds) {
-    parsed.sort(
-      (a, b) =>
-        Number(a.roundId) - Number(b.roundId) ||
-        a.sourceRow - b.sourceRow
-    );
+    rows.sort((a, b) => Number(a.roundId) - Number(b.roundId));
   } else {
-    parsed.sort((a, b) => {
-      const ta = a.timeUtc ? Date.parse(a.timeUtc) : NaN;
-      const tb = b.timeUtc ? Date.parse(b.timeUtc) : NaN;
+    const timestampCount = rows.filter(
+      row => row.timeMs !== null
+    ).length;
 
-      if (
-        Number.isFinite(ta) &&
-        Number.isFinite(tb) &&
-        ta !== tb
-      ) {
-        return ta - tb;
-      }
-
-      if (Number.isFinite(ta) !== Number.isFinite(tb)) {
-        return Number.isFinite(ta) ? -1 : 1;
-      }
-
-      return a.sourceRow - b.sourceRow;
-    });
+    if (
+      rows.length > 1 &&
+      timestampCount >= Math.ceil(rows.length * 0.8)
+    ) {
+      rows.sort((a, b) => (a.timeMs ?? 0) - (b.timeMs ?? 0));
+    }
   }
 
   const seenIds = new Set();
-  const deduped = [];
-  let duplicateIds = 0;
+  const deduplicatedRows = [];
 
-  for (const r of parsed) {
-    if (r.roundId && seenIds.has(r.roundId)) {
-      duplicateIds += 1;
-      continue;
-    }
+  for (const row of rows) {
+    const key = /^\d+$/.test(row.roundId)
+      ? `id:${row.roundId}`
+      : row.roundId;
 
-    if (r.roundId) seenIds.add(r.roundId);
-    deduped.push(r);
+    if (seenIds.has(key)) continue;
+
+    seenIds.add(key);
+    deduplicatedRows.push(row);
   }
 
-  if (!deduped.length) {
-    throw new Error(
-      'No valid multiplier rows were found in this CSV.'
+  const warnings = [];
+
+  if (missingTimestamps) {
+    warnings.push(
+      `${missingTimestamps} row(s) have missing/unparseable timestamps.`
     );
   }
 
-  const quality = {
-    sourceFile: path.basename(filePath),
-    headerColumns: headers,
-    multiplierColumn: headers[multiplierIndex],
-    roundIdColumn: roundIndex >= 0
-      ? headers[roundIndex]
-      : null,
-    timeColumn: timeIndex >= 0
-      ? headers[timeIndex]
-      : null,
-    sourceDataRows: raw.length - 1,
-    validRowsBeforeDeduplication: parsed.length,
-    validRounds: deduped.length,
-    invalidRows,
-    duplicateRoundIds: duplicateIds,
-    missingTimestamps: missingTimes,
-    missingRoundIds,
-    orderMethod: allNumericIds
-      ? 'numeric round_id ascending'
-      : 'timestamp ascending where available; source order fallback',
-    firstRound: deduped[0]?.roundId ?? null,
-    lastRound: deduped[deduped.length - 1]?.roundId ?? null,
-    warnings: []
-  };
+  if (missingRoundIds) {
+    warnings.push(
+      `${missingRoundIds} row(s) have missing round IDs.`
+    );
+  }
 
   if (invalidRows) {
-    quality.warnings.push(
-      `${invalidRows} row(s) skipped because multiplier was invalid or outside 1.00x–1000000x.`
+    warnings.push(
+      `${invalidRows} row(s) were skipped because their multiplier was invalid.`
     );
   }
 
-  if (duplicateIds) {
-    quality.warnings.push(
-      `${duplicateIds} duplicate round ID(s) removed.`
-    );
-  }
-
-  if (missingTimes) {
-    quality.warnings.push(
-      `${missingTimes} row(s) have missing/unparseable timestamps.`
-    );
-  }
-
-  if (roundIndex < 0) {
-    quality.warnings.push(
-      'No recognized round ID column; source row numbers were used as IDs.'
-    );
-  }
-
-  if (timeIndex < 0 && !allNumericIds) {
-    quality.warnings.push(
-      'No recognized timestamp column; CSV source order is being used where needed.'
-    );
-  }
-
-  return { rows: deduped, quality };
+  return {
+    rows: deduplicatedRows,
+    quality: {
+      sourceDataRows: lines.length - 1,
+      validRowsBeforeDeduplication: rows.length,
+      validRounds: deduplicatedRows.length,
+      invalidRows,
+      duplicateRoundIds: rows.length - deduplicatedRows.length,
+      missingTimestamps,
+      missingRoundIds,
+      headerColumns: headers,
+      multiplierColumn: headers[multiplierIndex],
+      roundIdColumn: roundIdIndex >= 0 ? headers[roundIdIndex] : null,
+      timeColumn: timeIndex >= 0 ? headers[timeIndex] : null,
+      orderMethod: allNumericIds
+        ? 'numeric round_id ascending'
+        : 'timestamp/source order',
+      firstRound: deduplicatedRows[0]?.roundId ?? null,
+      lastRound: deduplicatedRows[deduplicatedRows.length - 1]?.roundId ?? null,
+      warnings
+    }
+  };
 }
 
-function candidateCSVFiles() {
-  if (REQUESTED_CSV) return [REQUESTED_CSV];
+function csvCandidates() {
+  if (process.env.AVIATOR_CSV_PATH) {
+    return [
+      path.resolve(ROOT_DIR, process.env.AVIATOR_CSV_PATH)
+    ];
+  }
 
-  const preferred = [
-    path.join(DATA_DIR, 'aviator-2026-10 (1).csv'),
-    path.join(DATA_DIR, 'aviator-2026-10.csv'),
-    path.join(DATA_DIR, 'aviator_rounds.csv')
-  ];
+  const preferredFiles = [
+    'aviator-2026-10 (1).csv',
+    'aviator-2026-10.csv',
+    'aviator_rounds.csv'
+  ].map(name => path.join(DATA_DIR, name));
 
-  if (!fs.existsSync(DATA_DIR)) return [];
+  let otherFiles = [];
 
-  const existingPreferred = preferred.filter((p) => {
-    try {
-      return fs.existsSync(p) && fs.statSync(p).isFile();
-    } catch (_) {
-      return false;
-    }
-  });
+  try {
+    otherFiles = fs.readdirSync(DATA_DIR)
+      .filter(name => name.toLowerCase().endsWith('.csv'))
+      .sort()
+      .map(name => path.join(DATA_DIR, name));
+  } catch (_) {
+    // The error is reported below if no CSV can be found.
+  }
 
-  const preferredSet = new Set(
-    existingPreferred.map((p) => path.resolve(p))
-  );
-
-  const remaining = fs.readdirSync(DATA_DIR)
-    .filter((name) => name.toLowerCase().endsWith('.csv'))
-    .sort((a, b) => a.localeCompare(b))
-    .map((name) => path.join(DATA_DIR, name))
-    .filter((p) => !preferredSet.has(path.resolve(p)));
-
-  // Prefer the full research export over the 58-round seed.
-  return [...existingPreferred, ...remaining];
+  return [...new Set([...preferredFiles, ...otherFiles])];
 }
 
 function loadData(force = false) {
-  const files = candidateCSVFiles();
+  const candidates = csvCandidates();
+  let selectedFile = null;
 
-  if (!files.length) {
-    cache = {
-      file: null,
-      mtimeMs: 0,
-      size: 0,
-      loadedAt: new Date().toISOString(),
-      rows: [],
-      quality: null,
-      error: `No CSV file found in ${DATA_DIR}. Put the full history CSV in the repository data/ folder.`
-    };
-
-    return cache;
-  }
-
-  let lastError = null;
-
-  for (const file of files) {
+  for (const file of candidates) {
     try {
-      if (!fs.existsSync(file)) {
-        throw new Error(`CSV file does not exist: ${file}`);
+      if (fs.statSync(file).isFile()) {
+        selectedFile = file;
+        break;
       }
-
-      const stat = fs.statSync(file);
-
-      if (
-        !force &&
-        cache.file === file &&
-        cache.mtimeMs === stat.mtimeMs &&
-        cache.size === stat.size &&
-        cache.rows.length
-      ) {
-        return cache;
-      }
-
-      const parsed = parseRows(
-        fs.readFileSync(file, 'utf8'),
-        file
-      );
-
-      cache = {
-        file,
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-        loadedAt: new Date().toISOString(),
-        rows: parsed.rows,
-        quality: parsed.quality,
-        error: null
-      };
-
-      return cache;
-    } catch (err) {
-      lastError = err;
+    } catch (_) {
+      // Try the next candidate.
     }
   }
 
-  cache = {
-    file: files[0] || null,
-    mtimeMs: 0,
-    size: 0,
-    loadedAt: new Date().toISOString(),
-    rows: [],
-    quality: null,
-    error: lastError
-      ? lastError.message
-      : 'Unable to load CSV.'
-  };
+  if (!selectedFile) {
+    CACHE.error =
+      `No CSV found in ${DATA_DIR}. Add the research CSV to data/ or set AVIATOR_CSV_PATH.`;
 
-  return cache;
+    CACHE.rows = [];
+    CACHE.quality = null;
+    CACHE.file = null;
+
+    return CACHE;
+  }
+
+  let stat;
+
+  try {
+    stat = fs.statSync(selectedFile);
+  } catch (error) {
+    CACHE.error = error.message;
+    return CACHE;
+  }
+
+  const cacheIsCurrent =
+    !force &&
+    CACHE.file === selectedFile &&
+    CACHE.mtimeMs === stat.mtimeMs &&
+    CACHE.size === stat.size &&
+    CACHE.rows.length > 0;
+
+  if (cacheIsCurrent) {
+    return CACHE;
+  }
+
+  try {
+    const parsed = parseCsv(
+      fs.readFileSync(selectedFile, 'utf8')
+    );
+
+    CACHE.file = selectedFile;
+    CACHE.mtimeMs = stat.mtimeMs;
+    CACHE.size = stat.size;
+    CACHE.loadedAt = new Date().toISOString();
+    CACHE.rows = parsed.rows;
+    CACHE.quality = {
+      sourceFile: path.basename(selectedFile),
+      ...parsed.quality
+    };
+    CACHE.error = null;
+  } catch (error) {
+    CACHE.error = error.message;
+    CACHE.rows = [];
+    CACHE.quality = null;
+  }
+
+  return CACHE;
 }
 
 function mean(values) {
   return values.length
-    ? values.reduce((sum, n) => sum + n, 0) / values.length
+    ? values.reduce((sum, value) => sum + value, 0) / values.length
     : null;
 }
 
@@ -466,29 +376,20 @@ function median(values) {
     : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-function stddev(values) {
-  if (values.length < 2) return 0;
+function rateAtLeast(rows, target = TARGET_MULTIPLIER) {
+  if (!rows.length) return null;
 
-  const average = mean(values);
-
-  return Math.sqrt(
-    mean(values.map((x) => (x - average) ** 2))
-  );
+  return rows.filter(row => row.multiplier >= target).length /
+    rows.length * 100;
 }
 
-function rate(values, predicate) {
-  return values.length
-    ? 100 * values.filter(predicate).length / values.length
-    : null;
-}
-
-function longestStreak(values, predicate) {
+function longestStreak(rows, predicate) {
   let best = 0;
   let current = 0;
 
-  for (const value of values) {
-    if (predicate(value)) {
-      current += 1;
+  for (const row of rows) {
+    if (predicate(row)) {
+      current++;
       best = Math.max(best, current);
     } else {
       current = 0;
@@ -498,620 +399,363 @@ function longestStreak(values, predicate) {
   return best;
 }
 
-function roundNumber(n, digits = 2) {
-  return n == null || !Number.isFinite(n)
-    ? null
-    : Number(n.toFixed(digits));
-}
+function currentStreak(rows, predicate) {
+  let count = 0;
 
-function summarize(values) {
-  const sorted = [...values].sort((a, b) => a - b);
-
-  return {
-    samples: values.length,
-    mean: roundNumber(mean(values)),
-    median: roundNumber(median(values)),
-    min: values.length ? roundNumber(sorted[0]) : null,
-    max: values.length
-      ? roundNumber(sorted[sorted.length - 1])
-      : null,
-    stdev: roundNumber(stddev(values)),
-    p75: sorted.length
-      ? roundNumber(
-          sorted[
-            Math.min(
-              sorted.length - 1,
-              Math.floor(sorted.length * 0.75)
-            )
-          ]
-        )
-      : null,
-    below1_2: roundNumber(rate(values, (v) => v < 1.2)),
-    below1_5: roundNumber(rate(values, (v) => v < 1.5)),
-    atLeast2: roundNumber(rate(values, (v) => v >= 2)),
-    atLeast3: roundNumber(rate(values, (v) => v >= 3)),
-    atLeast5: roundNumber(rate(values, (v) => v >= 5)),
-    atLeast10: roundNumber(rate(values, (v) => v >= 10)),
-    longestBelow1_2: longestStreak(values, (v) => v < 1.2),
-    longestBelow1_5: longestStreak(values, (v) => v < 1.5)
-  };
-}
-
-function windowSummary(rows, size) {
-  const values = rows.slice(-size).map((r) => r.multiplier);
-
-  return {
-    window: size,
-    ...summarize(values)
-  };
-}
-
-function transitionRate(rows, condition) {
-  let eligible = 0;
-  let targetHits = 0;
-
-  for (let i = 0; i < rows.length - 1; i += 1) {
-    if (condition(rows[i].multiplier)) {
-      eligible += 1;
-
-      if (rows[i + 1].multiplier >= TARGET_MULTIPLIER) {
-        targetHits += 1;
-      }
-    }
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (!predicate(rows[i])) break;
+    count++;
   }
 
-  return {
-    samples: eligible,
-    hits: targetHits,
-    hitRate: eligible
-      ? roundNumber(100 * targetHits / eligible)
-      : null
-  };
+  return count;
 }
 
-// Historical evidence score only; not a probability estimate.
 function scoreAt(rows, endIndex) {
-  if (endIndex < MIN_HISTORY) {
-    return {
-      score: 0,
-      reasons: ['Not enough prior rounds for scoring.'],
-      features: {}
-    };
+  // The score may only use rows before endIndex.
+  const history = rows.slice(0, endIndex);
+
+  if (history.length < MIN_HISTORY) {
+    return { score: null, features: null };
   }
 
-  const prior = rows
-    .slice(0, endIndex)
-    .map((r) => r.multiplier);
+  const window6 = history.slice(-6);
+  const window12 = history.slice(-12);
+  const window24 = history.slice(-24);
 
-  const last = prior[prior.length - 1];
-  const w6 = prior.slice(-6);
-  const w12 = prior.slice(-12);
-  const w24 = prior.slice(-24);
+  const rate6 = rateAtLeast(window6);
+  const rate12 = rateAtLeast(window12);
+  const rate24 = rateAtLeast(window24);
 
-  const r6 = rate(w6, (v) => v >= TARGET_MULTIPLIER) ?? 0;
-  const r12 = rate(w12, (v) => v >= TARGET_MULTIPLIER) ?? 0;
-  const r24 = rate(w24, (v) => v >= TARGET_MULTIPLIER) ?? 0;
+  const latest = history[history.length - 1];
 
-  const lowStreak = longestStreak(
-    w6,
-    (v) => v < 1.5
+  const lowCurrentStreak = currentStreak(
+    history,
+    row => row.multiplier < 1.5
   );
 
-  const recentMean = mean(w6) ?? 0;
-
+  // This is a descriptive evidence score, not a win probability.
   let score = 50;
-  const reasons = [];
 
-  score += Math.max(
-    -12,
-    Math.min(12, (r6 - r24) * 0.24)
-  );
+  score += (rate6 - 50) * 0.40;
+  score += (rate12 - 50) * 0.30;
+  score += (rate24 - 50) * 0.20;
 
-  score += Math.max(
-    -8,
-    Math.min(8, (r12 - r24) * 0.12)
-  );
-
-  if (r6 >= r24 + 15) {
-    reasons.push(
-      'Recent >=2x rate is above the 24-round reference window.'
-    );
-  } else if (r6 <= r24 - 15) {
-    reasons.push(
-      'Recent >=2x rate is below the 24-round reference window.'
-    );
+  if (lowCurrentStreak >= 3) {
+    score -= Math.min(8, (lowCurrentStreak - 2) * 2);
   }
 
-  if (last >= 10) {
-    score -= 8;
-    reasons.push(
-      'The latest multiplier was very high; a caution adjustment was applied.'
-    );
-  } else if (last >= 5) {
-    score -= 4;
-    reasons.push(
-      'The latest multiplier was elevated; a caution adjustment was applied.'
-    );
+  if (latest.multiplier >= 10) {
+    score -= 2;
   }
 
-  if (lowStreak >= 3) {
-    score -= Math.min(12, lowStreak * 2);
-    reasons.push(
-      `A low-multiplier streak of ${lowStreak} appears in the latest six rounds.`
-    );
-  }
-
-  if (recentMean > 0 && recentMean < 1.8) {
-    score -= 3;
-    reasons.push('The latest six-round mean is low.');
-  }
-
-  if (recentMean >= 3 && r6 >= r24) {
-    score += 3;
-    reasons.push(
-      'Recent mean and >=2x rate are comparatively elevated.'
-    );
+  if (latest.multiplier < 1.2) {
+    score += 1;
   }
 
   score = Math.max(0, Math.min(100, Math.round(score)));
 
-  if (!reasons.length) {
-    reasons.push(
-      'Recent windows do not show a strong difference from the reference window.'
-    );
-  }
-
   return {
     score,
-    reasons,
     features: {
-      lastMultiplier: last,
-      rate2x6: roundNumber(r6),
-      rate2x12: roundNumber(r12),
-      rate2x24: roundNumber(r24),
-      recentMean6: roundNumber(recentMean),
-      lowStreak6: lowStreak
+      sampleCount: history.length,
+      rate2x6: rate6,
+      rate2x12: rate12,
+      rate2x24: rate24,
+      lowCurrentStreak,
+      recentMean: mean(window6.map(row => row.multiplier)),
+      latestMultiplier: latest.multiplier
     }
   };
 }
 
 function evaluateThreshold(evaluations, threshold) {
-  const signals = evaluations.filter(
-    (item) => item.score >= threshold
+  const selected = evaluations.filter(
+    item => item.score !== null && item.score >= threshold
   );
 
-  const hits = signals.filter(
-    (item) => item.actualNext >= TARGET_MULTIPLIER
+  const hits = selected.filter(
+    item => item.actualNext >= TARGET_MULTIPLIER
   ).length;
 
-  const misses = signals.length - hits;
-  const total = evaluations.length;
+  const misses = selected.length - hits;
 
-  const baselineHits = evaluations.filter(
-    (item) => item.actualNext >= TARGET_MULTIPLIER
-  ).length;
-
-  const hitRate = signals.length
-    ? 100 * hits / signals.length
+  const hitRate = selected.length
+    ? hits / selected.length * 100
     : null;
 
-  const baselineHitRate = total
-    ? 100 * baselineHits / total
-    : null;
+  const baseline = rateAtLeast(
+    evaluations.map(item => ({ multiplier: item.actualNext })),
+    TARGET_MULTIPLIER
+  );
 
   return {
     threshold,
-    samples: signals.length,
+    samples: selected.length,
     hits,
     misses,
-    hitRate: roundNumber(hitRate),
-    coverage: total
-      ? roundNumber(100 * signals.length / total)
-      : 0,
-    baselineSamples: total,
-    baselineHits,
-    baselineHitRate: roundNumber(baselineHitRate),
+    hitRate,
+    baselineHitRate: baseline,
     liftPercentagePoints:
-      hitRate !== null && baselineHitRate !== null
-        ? roundNumber(hitRate - baselineHitRate)
-        : null,
-    falseSignalRate: signals.length
-      ? roundNumber(100 * misses / signals.length)
-      : null,
-    meetsMinimumSamples:
-      signals.length >= BACKTEST_MIN_SAMPLES,
+      hitRate === null || baseline === null
+        ? null
+        : hitRate - baseline,
+    coverage: evaluations.length
+      ? selected.length / evaluations.length * 100
+      : 0,
+    meetsMinimumSamples: selected.length >= BACKTEST_MIN_SAMPLES,
     aboveBaseline:
       hitRate !== null &&
-      baselineHitRate !== null &&
-      hitRate > baselineHitRate,
+      baseline !== null &&
+      hitRate > baseline,
     diagnosticOnly: true
   };
-}
-
-function buildChronologicalDiagnostics(evaluations) {
-  const segments = [];
-
-  for (let s = 0; s < CHRONOLOGICAL_SEGMENTS; s += 1) {
-    const start = Math.floor(
-      evaluations.length * s / CHRONOLOGICAL_SEGMENTS
-    );
-
-    const end = Math.floor(
-      evaluations.length * (s + 1) / CHRONOLOGICAL_SEGMENTS
-    );
-
-    const segmentEvaluations = evaluations.slice(start, end);
-
-    segments.push({
-      segment: s + 1,
-      period: `chronological segment ${s + 1} of ${CHRONOLOGICAL_SEGMENTS}`,
-      evaluatedPositions: segmentEvaluations.length,
-      thresholds: DIAGNOSTIC_THRESHOLDS.map(
-        (threshold) =>
-          evaluateThreshold(segmentEvaluations, threshold)
-      )
-    });
-  }
-
-  return segments;
 }
 
 function createEvaluations(rows) {
   const evaluations = [];
 
-  // Each score uses only rounds preceding the evaluated next round.
-  for (let i = MIN_HISTORY; i < rows.length - 1; i += 1) {
-    const model = scoreAt(rows, i);
+  /*
+   * Correct walk-forward alignment:
+   * At index i, the model sees rows [0 ... i-1].
+   * The outcome being tested is rows[i].
+   *
+   * This prevents using the wrong future round as the target.
+   */
+  for (let i = MIN_HISTORY; i < rows.length; i++) {
+    const result = scoreAt(rows, i);
+
+    if (result.score === null) continue;
 
     evaluations.push({
-      score: model.score,
-      actualNext: rows[i + 1].multiplier,
+      position: i,
+      referenceRoundId: rows[i - 1].roundId,
       roundId: rows[i].roundId,
-      nextRoundId: rows[i + 1].roundId
+      score: result.score,
+      actualNext: rows[i].multiplier
     });
   }
 
   return evaluations;
 }
 
-function scoreDistribution(evaluations) {
-  const counts = {
-    below50: 0,
-    from50to59: 0,
-    from60to71: 0,
-    from72to77: 0,
-    from78to100: 0
-  };
+function backtest(rows) {
+  const evaluations = createEvaluations(rows);
 
-  let scoreSum = 0;
-  let minScore = null;
-  let maxScore = null;
+  const split = Math.floor(evaluations.length * 0.7);
 
-  for (const item of evaluations) {
-    const score = item.score;
+  const development = evaluations.slice(0, split);
+  const holdout = evaluations.slice(split);
 
-    scoreSum += score;
-    minScore = minScore === null
-      ? score
-      : Math.min(minScore, score);
+  const diagnostics = DIAGNOSTIC_THRESHOLDS.map(threshold => ({
+    threshold,
+    development: evaluateThreshold(development, threshold),
+    holdout: evaluateThreshold(holdout, threshold),
+    overall: evaluateThreshold(evaluations, threshold)
+  }));
 
-    maxScore = maxScore === null
-      ? score
-      : Math.max(maxScore, score);
-
-    if (score < 50) {
-      counts.below50 += 1;
-    } else if (score < 60) {
-      counts.from50to59 += 1;
-    } else if (score < 72) {
-      counts.from60to71 += 1;
-    } else if (score < 78) {
-      counts.from72to77 += 1;
-    } else {
-      counts.from78to100 += 1;
-    }
-  }
-
-  return {
-    minScore,
-    maxScore,
-    averageScore: evaluations.length
-      ? roundNumber(scoreSum / evaluations.length)
-      : null,
-    scoreCounts: counts
-  };
-}
-
-function walkForward(rows) {
-  const allEvaluations = createEvaluations(rows);
-
-  // Keep the final chronological portion untouched by threshold selection.
-  const splitIndex = Math.floor(
-    allEvaluations.length * (1 - HOLDOUT_FRACTION)
-  );
-
-  const development = allEvaluations.slice(0, splitIndex);
-  const holdout = allEvaluations.slice(splitIndex);
-
-  // Production performance and gates are based on holdout only.
   const production = evaluateThreshold(
     holdout,
     SIGNAL_THRESHOLD
   );
 
-  const watchDiagnostic = evaluateThreshold(
+  const watch = evaluateThreshold(
     holdout,
     WATCH_THRESHOLD
   );
 
-  const overallProduction = evaluateThreshold(
-    allEvaluations,
-    SIGNAL_THRESHOLD
-  );
-
-  const baselineHits = holdout.filter(
-    (item) => item.actualNext >= TARGET_MULTIPLIER
-  ).length;
-
-  const holdoutBaselineRate = holdout.length
-    ? 100 * baselineHits / holdout.length
-    : null;
-
-  const productionStable =
-    production.meetsMinimumSamples &&
-    production.aboveBaseline;
-
-  const watchEvidenceSufficient =
-    watchDiagnostic.meetsMinimumSamples &&
-    watchDiagnostic.aboveBaseline;
+  const scores = evaluations.map(item => item.score);
 
   return {
-    target: `next round >= ${TARGET_MULTIPLIER.toFixed(2)}x`,
-
-    method:
-      'Chronological walk-forward. Each score uses only prior rounds. The latest 30% of evaluated positions is reserved as holdout.',
-
-    evaluationDesign: {
-      type: 'chronological-development-holdout',
-      developmentFraction: roundNumber(
-        100 * (1 - HOLDOUT_FRACTION)
-      ),
-      holdoutFraction: roundNumber(100 * HOLDOUT_FRACTION),
-      totalEvaluatedPositions: allEvaluations.length,
-      developmentPositions: development.length,
-      holdoutPositions: holdout.length,
-      thresholdSelection:
-        'No automatic threshold selection. Production threshold remains fixed at 72.',
-      limitation:
-        'The holdout is historical and does not guarantee future performance.'
-    },
-
-    minHistory: MIN_HISTORY,
-
-    // These compatibility fields now report holdout performance.
-    testedPositions: holdout.length,
-    samples: production.samples,
-    hits: production.hits,
-    misses: production.misses,
-    hitRate: production.hitRate,
-    coverage: production.coverage,
-
-    baselineSamples: holdout.length,
-    baselineHits,
-    baselineHitRate: roundNumber(holdoutBaselineRate),
-
-    falseSignalRate: production.falseSignalRate,
-    meetsMinimumSamples: production.meetsMinimumSamples,
-    aboveBaseline: production.aboveBaseline,
-    stable: productionStable,
-
+    targetMultiplier: TARGET_MULTIPLIER,
+    totalEvaluatedPositions: evaluations.length,
+    developmentPositions: development.length,
+    holdoutPositions: holdout.length,
+    split: 'Chronological 70% development / 30% holdout',
+    productionThreshold: SIGNAL_THRESHOLD,
+    watchThreshold: WATCH_THRESHOLD,
+    productionHoldout: production,
+    watchHoldout: watch,
+    diagnostics,
     scoreDiagnostics: {
-      ...scoreDistribution(allEvaluations),
-      threshold: SIGNAL_THRESHOLD,
-      scope: 'all chronological evaluations'
+      min: scores.length ? Math.min(...scores) : null,
+      max: scores.length ? Math.max(...scores) : null,
+      average: mean(scores),
+      countAtLeast72: scores.filter(score => score >= 72).length
     },
-
-    holdout: {
-      productionThreshold: production,
-      watchThreshold: watchDiagnostic,
-      evidenceSufficientForProduction: productionStable,
-      evidenceSufficientForWatch: watchEvidenceSufficient,
-      baselineHitRate: roundNumber(holdoutBaselineRate)
-    },
-
-    developmentDiagnostics: {
-      evaluatedPositions: development.length,
-      thresholds: DIAGNOSTIC_THRESHOLDS.map(
-        (threshold) =>
-          evaluateThreshold(development, threshold)
-      ),
-      note:
-        'Development-period results are exploratory and must not be presented as holdout performance.'
-    },
-
-    overallHistoricalDiagnostics: {
-      evaluatedPositions: allEvaluations.length,
-      productionThreshold: overallProduction,
-      thresholds: DIAGNOSTIC_THRESHOLDS.map(
-        (threshold) =>
-          evaluateThreshold(allEvaluations, threshold)
-      ),
-      chronologicalSegments:
-        buildChronologicalDiagnostics(allEvaluations)
-    },
-
-    thresholdDiagnostics: {
-      purpose:
-        'Exploratory comparison only. Thresholds below are not automatically promoted to production.',
-
-      productionThreshold: SIGNAL_THRESHOLD,
-      watchThreshold: WATCH_THRESHOLD,
-      thresholdsCompared: DIAGNOSTIC_THRESHOLDS,
-
-      development: DIAGNOSTIC_THRESHOLDS.map(
-        (threshold) =>
-          evaluateThreshold(development, threshold)
-      ),
-
-      holdout: DIAGNOSTIC_THRESHOLDS.map(
-        (threshold) =>
-          evaluateThreshold(holdout, threshold)
-      ),
-
-      chronologicalSegments:
-        buildChronologicalDiagnostics(allEvaluations),
-
-      interpretation:
-        'Review sample count, hit rate, coverage, lift versus baseline, and consistency across periods. Repeatedly testing many thresholds can produce misleading apparent improvements.'
-    },
-
     note:
-      'Historical evidence only. No guaranteed next multiplier.'
+      'Walk-forward historical diagnostics only. Holdout results are descriptive, not proof of future performance. Thresholds are fixed in advance; no guarantee of the next multiplier.'
   };
 }
 
-function buildResponse(force = false) {
-  const data = loadData(force);
-
-  if (!data.rows.length) {
+function analyze(rows) {
+  if (!rows.length) {
     return {
       ok: false,
       version: VERSION,
-      error: data.error || 'No valid data loaded.',
-      source: data.file ? path.basename(data.file) : null,
-      generatedAt: new Date().toISOString()
+      error: CACHE.error || 'No valid CSV rounds loaded.'
     };
   }
 
-  const rows = data.rows;
-  const values = rows.map((r) => r.multiplier);
-  const last = rows[rows.length - 1];
+  const values = rows.map(row => row.multiplier);
+  const latest = rows[rows.length - 1];
+  const previous = rows[rows.length - 2] || null;
 
-  const model = scoreAt(rows, rows.length);
-  const backtest = walkForward(rows);
+  const result = scoreAt(rows, rows.length);
+  const backtestResult = backtest(rows);
 
-  const productionGatePass =
-    backtest.holdout.evidenceSufficientForProduction;
+  const enoughHistory = rows.length >= MIN_HISTORY;
+  const production = backtestResult.productionHoldout;
 
-  const watchGatePass =
-    backtest.holdout.evidenceSufficientForWatch;
-
-  const gates = [
-    {
-      name: 'Minimum history',
-      pass: rows.length >= MIN_HISTORY,
-      detail:
-        `${rows.length} valid rounds; at least ${MIN_HISTORY} required.`
-    },
-    {
-      name: 'Holdout sample count',
-      pass: backtest.meetsMinimumSamples,
-      detail:
-        `${backtest.samples} holdout signals at threshold ${SIGNAL_THRESHOLD}; at least ${BACKTEST_MIN_SAMPLES} required.`
-    },
-    {
-      name: 'Holdout above baseline',
-      pass: backtest.aboveBaseline,
-      detail:
-        `Holdout signal hit rate ${backtest.hitRate ?? 'n/a'}% vs holdout baseline ${backtest.baselineHitRate ?? 'n/a'}%.`
-    },
-    {
-      name: 'Data quality',
-      pass:
-        data.quality.validRounds >= MIN_HISTORY &&
-        data.quality.duplicateRoundIds === 0,
-      detail:
-        `${data.quality.validRounds} valid rounds; ${data.quality.duplicateRoundIds} duplicate IDs removed.`
-    }
-  ];
-
-  const allGatesPass = gates.every((gate) => gate.pass);
+  const evidencePass =
+    production.meetsMinimumSamples &&
+    production.aboveBaseline;
 
   let action = 'NO SIGNAL';
+  const reasons = [];
 
-  if (
-    allGatesPass &&
-    productionGatePass &&
-    model.score >= SIGNAL_THRESHOLD
-  ) {
-    action = 'SIGNAL';
-  } else if (
-    rows.length >= MIN_HISTORY &&
-    watchGatePass &&
-    model.score >= WATCH_THRESHOLD
-  ) {
-    action = 'WATCH';
+  if (!enoughHistory) {
+    reasons.push(
+      `At least ${MIN_HISTORY} historical rounds are required.`
+    );
   }
 
-  const distribution = summarize(values);
+  if (enoughHistory && result.score < WATCH_THRESHOLD) {
+    reasons.push(
+      'Current evidence score is below the watch threshold.'
+    );
+  }
+
+  if (!evidencePass) {
+    reasons.push(
+      'Holdout evidence does not satisfy both the minimum sample and above-baseline gates.'
+    );
+  }
+
+  if (
+    enoughHistory &&
+    evidencePass &&
+    result.score >= SIGNAL_THRESHOLD
+  ) {
+    action = 'SIGNAL';
+    reasons.push(
+      'The configured evidence gates passed; this is still not a prediction guarantee.'
+    );
+  } else if (
+    enoughHistory &&
+    evidencePass &&
+    result.score >= WATCH_THRESHOLD
+  ) {
+    action = 'WATCH';
+    reasons.push(
+      'Evidence qualifies for watch-only status, not a guaranteed outcome.'
+    );
+  }
 
   return {
     ok: true,
     version: VERSION,
+    source: path.basename(CACHE.file || ''),
+    sourcePath: CACHE.file
+      ? path.relative(ROOT_DIR, CACHE.file).split(path.sep).join('/')
+      : null,
+    loadedAt: CACHE.loadedAt,
     generatedAt: new Date().toISOString(),
+    rounds: rows.length,
 
-    disclaimer:
-      'Historical evidence and walk-forward analysis only. No guaranteed next multiplier.',
-
-    source: path.basename(data.file),
-    sourcePath: path.relative(ROOT_DIR, data.file),
-
-    summary: {
-      samples: rows.length,
-      previous: rows.length > 1
-        ? rows[rows.length - 2]
-        : null,
-      latest: last,
-      nextRound: null
+    latestRound: {
+      roundId: latest.roundId,
+      time: latest.time,
+      multiplier: latest.multiplier
     },
+
+    previousRound: previous
+      ? {
+          roundId: previous.roundId,
+          multiplier: previous.multiplier
+        }
+      : null,
 
     signal: {
       action,
-      score: model.score,
+      score: result.score,
+      targetMultiplier: TARGET_MULTIPLIER,
       confidence: null,
       confidenceLabel: 'Evidence score, not win probability',
-      target: `>= ${TARGET_MULTIPLIER.toFixed(2)}x`,
-      reasons: [
-        ...model.reasons,
-        ...(action === 'NO SIGNAL'
-          ? ['Evidence gates are not satisfied; no actionable signal is approved.']
-          : []),
-        ...(action === 'WATCH'
-          ? ['WATCH is an informational research status, not a confirmed entry or guarantee.']
-          : [])
-      ]
+      reasons
     },
 
-    dataQuality: data.quality,
-    distribution,
-
-    windows: {
-      short: windowSummary(rows, 6),
-      medium: windowSummary(rows, 12),
-      long: windowSummary(rows, 24)
+    distribution: {
+      samples: values.length,
+      mean: mean(values),
+      median: median(values),
+      min: Math.min(...values),
+      max: Math.max(...values),
+      atLeast2: rateAtLeast(rows, 2),
+      atLeast3: rateAtLeast(rows, 3),
+      atLeast5: rateAtLeast(rows, 5),
+      atLeast10: rateAtLeast(rows, 10),
+      below1_2: values.filter(value => value < 1.2).length /
+        values.length * 100,
+      below1_5: values.filter(value => value < 1.5).length /
+        values.length * 100
     },
 
-    transitions: {
-      afterLow: transitionRate(
-        rows,
-        (v) => v < 1.5
-      ),
-      afterVeryLow: transitionRate(
-        rows,
-        (v) => v < 1.2
-      )
+    windows: [6, 12, 24].map(size => {
+      const window = rows.slice(-size);
+
+      return {
+        window: size,
+        samples: window.length,
+        mean: mean(window.map(row => row.multiplier)),
+        atLeast2: rateAtLeast(window, 2),
+        atLeast3: rateAtLeast(window, 3)
+      };
+    }),
+
+    evidenceGates: [
+      {
+        name: 'Minimum history',
+        passed: enoughHistory,
+        detail: `${rows.length} rounds; minimum ${MIN_HISTORY}`
+      },
+      {
+        name: 'Holdout backtest sample count',
+        passed: production.meetsMinimumSamples,
+        detail:
+          `${production.samples} selected holdout signals; minimum ${BACKTEST_MIN_SAMPLES}`
+      },
+      {
+        name: 'Holdout above baseline',
+        passed: production.aboveBaseline,
+        detail:
+          `${production.hitRate === null ? 'n/a' : production.hitRate.toFixed(2) + '%'} hit rate vs ` +
+          `${production.baselineHitRate === null ? 'n/a' : production.baselineHitRate.toFixed(2) + '%'} baseline`
+      },
+      {
+        name: 'Data quality',
+        passed:
+          !!CACHE.quality &&
+          CACHE.quality.invalidRows === 0 &&
+          CACHE.quality.duplicateRoundIds === 0,
+        detail: CACHE.quality
+          ? `${CACHE.quality.invalidRows} invalid, ${CACHE.quality.duplicateRoundIds} duplicate IDs`
+          : 'CSV unavailable'
+      }
+    ],
+
+    dataQuality: CACHE.quality,
+
+    backtestSummary: {
+      evaluated: backtestResult.totalEvaluatedPositions,
+      holdout: backtestResult.holdoutPositions,
+      productionHoldout: backtestResult.productionHoldout,
+      watchHoldout: backtestResult.watchHoldout
     },
 
-    regime: {
-      latest6Mean: roundNumber(mean(values.slice(-6))),
-      latest12Mean: roundNumber(mean(values.slice(-12))),
-      latest24Mean: roundNumber(mean(values.slice(-24)))
-    },
+    features: result.features,
 
-    features: model.features,
-    backtest,
-    evidenceGates: gates,
-    recentRounds: rows.slice(-20).reverse()
+    disclaimer:
+      'Historical evidence and walk-forward analysis only. No guaranteed next multiplier. Aviator outcomes may be random. Use for research only.'
   };
 }
 
@@ -1128,87 +772,99 @@ app.get('/', (_req, res) => {
 app.get('/api/status', (_req, res) => {
   const data = loadData();
 
-  res.json({
-    ok: data.rows.length > 0,
+  res.status(data.error ? 503 : 200).json({
+    ok: !data.error,
     version: VERSION,
     source: data.file ? path.basename(data.file) : null,
     sourcePath: data.file
-      ? path.relative(ROOT_DIR, data.file)
+      ? path.relative(ROOT_DIR, data.file).split(path.sep).join('/')
       : null,
     loadedAt: data.loadedAt,
     rounds: data.rows.length,
     dataQuality: data.quality,
     error: data.error,
-    csvPathOverrideSet: Boolean(REQUESTED_CSV),
+    csvPathOverrideSet: !!process.env.AVIATOR_CSV_PATH,
     generatedAt: new Date().toISOString()
   });
 });
 
 app.get('/api/analyze', (_req, res) => {
-  const result = buildResponse();
-  res.status(result.ok ? 200 : 503).json(result);
+  const data = loadData();
+
+  if (data.error) {
+    return res.status(503).json({
+      ok: false,
+      version: VERSION,
+      error: data.error
+    });
+  }
+
+  res.json(analyze(data.rows));
 });
 
 app.get('/api/backtest', (_req, res) => {
-  const result = buildResponse();
+  const data = loadData();
 
-  if (!result.ok) {
-    return res.status(503).json(result);
+  if (data.error) {
+    return res.status(503).json({
+      ok: false,
+      version: VERSION,
+      error: data.error
+    });
   }
 
-  return res.json({
+  res.json({
     ok: true,
     version: VERSION,
-    generatedAt: result.generatedAt,
-    source: result.source,
-    backtest: result.backtest,
-    evidenceGates: result.evidenceGates,
-    disclaimer: result.disclaimer
+    ...backtest(data.rows)
   });
 });
 
 app.get('/api/history', (req, res) => {
   const data = loadData();
 
-  if (!data.rows.length) {
+  if (data.error) {
     return res.status(503).json({
       ok: false,
+      version: VERSION,
       error: data.error
     });
   }
 
-  const requestedLimit = Number(req.query.limit) || 100;
-  const requestedOffset = Number(req.query.offset) || 0;
+  const requestedLimit =
+    Number.parseInt(req.query.limit, 10) || 100;
 
   const limit = Math.max(
     1,
-    Math.min(
-      MAX_HISTORY_RESPONSE,
-      Math.floor(requestedLimit)
-    )
+    Math.min(MAX_HISTORY_RESPONSE, requestedLimit)
   );
 
-  const offset = Math.max(0, Math.floor(requestedOffset));
+  const rows = data.rows.slice(-limit).map(row => ({
+    roundId: row.roundId,
+    time: row.time,
+    multiplier: row.multiplier
+  }));
 
-  const rounds = data.rows
-    .slice()
-    .reverse()
-    .slice(offset, offset + limit);
-
-  return res.json({
+  res.json({
     ok: true,
     version: VERSION,
-    source: path.basename(data.file),
     total: data.rows.length,
-    limit,
-    offset,
-    rounds
+    returned: rows.length,
+    rows
   });
 });
 
-app.get('/api/reload', (_req, res) => {
-  const result = buildResponse(true);
-  res.status(result.ok ? 200 : 503).json(result);
+app.post('/api/reload', (_req, res) => {
+  const data = loadData(true);
+
+  res.status(data.error ? 503 : 200).json({
+    ok: !data.error,
+    version: VERSION,
+    source: data.file ? path.basename(data.file) : null,
+    rounds: data.rows.length,
+    error: data.error,
+    loadedAt: data.loadedAt
+  });
 });
 
 app.use((err, _req, res, _next) => {
@@ -1221,8 +877,9 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, () => {
   console.log(
-    `AVIATOR AI PREDICTOR ${VERSION} listening on ${PORT}`
+    `AVIATOR AI PREDICTOR ${VERSION} listening on port ${PORT}`
   );
+  console.log(`CSV directory: ${DATA_DIR}`);
 });
