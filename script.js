@@ -1,130 +1,325 @@
 'use strict';
 
-const API_BASE = 'https://aviator-ai-predictor-v1.onrender.com';
-const $ = (id) => document.getElementById(id);
-let busy = false;
+const API_BASE = 'https://aviator-ai-predictor-1.onrender.com';
 
-function setText(id, value) {
-  const el = $(id);
-  if (el) el.textContent = value == null || value === '' ? '—' : String(value);
+const $ = id => document.getElementById(id);
+
+const fmt = (value, digits = 2) =>
+  value === null ||
+  value === undefined ||
+  !Number.isFinite(Number(value))
+    ? '—'
+    : Number(value).toLocaleString(undefined, {
+        maximumFractionDigits: digits,
+        minimumFractionDigits: digits
+      });
+
+const pct = value =>
+  value === null ||
+  value === undefined ||
+  !Number.isFinite(Number(value))
+    ? '—'
+    : `${fmt(value)}%`;
+
+const safe = value =>
+  value === null || value === undefined || value === ''
+    ? '—'
+    : String(value);
+
+function showError(message) {
+  const box = $('errorBox');
+  box.textContent = message;
+  box.hidden = !message;
 }
-function fmt(value, suffix = '') {
-  return value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}${suffix}`;
-}
-function pct(value) { return value == null ? '—' : fmt(value, '%'); }
-function fmtTime(value) {
-  if (!value) return '—';
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString();
-}
-function setStatus(ok, label) {
-  setText('apiStatus', label || (ok ? 'API ONLINE' : 'API OFFLINE'));
-  $('statusDot').classList.toggle('online', Boolean(ok));
+
+function setApi(ok, label) {
+  $('apiStatus').textContent = label;
+
+  $('statusDot').classList.toggle('online', !!ok);
   $('statusDot').classList.toggle('offline', !ok);
 }
-function showError(message) {
-  const el = $('errorBox');
-  el.textContent = message;
-  el.classList.remove('hidden');
+
+function makeCell(text) {
+  const cell = document.createElement('td');
+  cell.textContent = safe(text);
+  return cell;
 }
-function clearError() { $('errorBox').classList.add('hidden'); $('errorBox').textContent = ''; }
-function addCell(row, value) {
-  const td = document.createElement('td');
-  td.textContent = value == null || value === '' ? '—' : String(value);
-  row.appendChild(td);
+
+function addRow(tbody, values) {
+  const row = document.createElement('tr');
+
+  values.forEach(value => {
+    row.appendChild(makeCell(value));
+  });
+
+  tbody.appendChild(row);
 }
-function renderWindows(windows = {}) {
-  const body = $('windowsBody');
+
+function fillTable(
+  id,
+  rows,
+  emptyColumns,
+  emptyText = 'No data available.'
+) {
+  const body = $(id);
   body.replaceChildren();
-  const rows = [ ['Short', windows.short], ['Medium', windows.medium], ['Long', windows.long] ];
-  rows.forEach(([name, item]) => {
-    const tr = document.createElement('tr');
-    [name, item?.samples, item?.mean == null ? '—' : `${fmt(item.mean)}x`, pct(item?.atLeast2), pct(item?.atLeast5)].forEach(v => addCell(tr, v));
-    body.appendChild(tr);
+
+  if (!rows.length) {
+    const row = document.createElement('tr');
+    const cell = makeCell(emptyText);
+
+    cell.colSpan = emptyColumns;
+    row.appendChild(cell);
+    body.appendChild(row);
+    return;
+  }
+
+  rows.forEach(values => addRow(body, values));
+}
+
+function renderAnalyze(data) {
+  $('sourceName').textContent = safe(
+    data.sourcePath || data.source
+  );
+
+  $('roundCount').textContent =
+    Number(data.rounds || 0).toLocaleString();
+
+  $('generatedAt').textContent = data.generatedAt
+    ? new Date(data.generatedAt).toLocaleString()
+    : '—';
+
+  $('latestValue').textContent = data.latestRound
+    ? `${fmt(data.latestRound.multiplier)}x`
+    : '—';
+
+  const signal = data.signal || {};
+
+  $('signalAction').textContent = safe(
+    signal.action || 'NO SIGNAL'
+  );
+
+  $('signalAction').className =
+    'action-label ' +
+    String(signal.action || 'NO SIGNAL')
+      .toLowerCase()
+      .replace(/\s+/g, '-');
+
+  $('signalScore').textContent = safe(signal.score);
+
+  $('signalTarget').textContent =
+    `${fmt(signal.targetMultiplier || 2)}x`;
+
+  $('confidenceLabel').textContent = safe(
+    signal.confidenceLabel ||
+    'Evidence score, not win probability'
+  );
+
+  const reasons = $('signalReasons');
+  reasons.replaceChildren();
+
+  (
+    signal.reasons ||
+    ['No explanation returned.']
+  ).forEach(reason => {
+    const item = document.createElement('li');
+    item.textContent = reason;
+    reasons.appendChild(item);
+  });
+
+  const distribution = data.distribution || {};
+
+  $('meanValue').textContent = fmt(distribution.mean);
+  $('medianValue').textContent = fmt(distribution.median);
+  $('minValue').textContent = `${fmt(distribution.min)}x`;
+  $('maxValue').textContent = `${fmt(distribution.max)}x`;
+  $('atLeast2').textContent = pct(distribution.atLeast2);
+  $('atLeast10').textContent = pct(distribution.atLeast10);
+
+  fillTable(
+    'windowsBody',
+    (data.windows || []).map(window => [
+      `${window.window} rounds`,
+      window.samples,
+      fmt(window.mean),
+      pct(window.atLeast2),
+      pct(window.atLeast3)
+    ]),
+    5
+  );
+
+  const quality = data.dataQuality || {};
+
+  $('qualityStatus').textContent =
+    quality && quality.validRounds
+      ? (
+          quality.invalidRows === 0 &&
+          quality.duplicateRoundIds === 0
+            ? 'PASS'
+            : 'REVIEW'
+        )
+      : 'UNAVAILABLE';
+
+  $('sourceDataRows').textContent =
+    safe(quality.sourceDataRows);
+
+  $('invalidRows').textContent =
+    safe(quality.invalidRows);
+
+  $('duplicateIds').textContent =
+    safe(quality.duplicateRoundIds);
+
+  $('missingTimes').textContent =
+    safe(quality.missingTimestamps);
+
+  $('columnInfo').textContent =
+    `Columns: multiplier=${safe(quality.multiplierColumn)}, ` +
+    `round ID=${safe(quality.roundIdColumn)}, ` +
+    `timestamp=${safe(quality.timeColumn)} · ` +
+    `Order: ${safe(quality.orderMethod)}`;
+
+  const warnings = $('qualityWarnings');
+  warnings.replaceChildren();
+
+  (quality.warnings || []).forEach(warning => {
+    const item = document.createElement('li');
+    item.textContent = warning;
+    warnings.appendChild(item);
+  });
+
+  if (!(quality.warnings || []).length) {
+    const item = document.createElement('li');
+    item.textContent = 'No CSV quality warnings reported.';
+    warnings.appendChild(item);
+  }
+
+  const gates = $('evidenceGates');
+  gates.replaceChildren();
+
+  (data.evidenceGates || []).forEach(gate => {
+    const container = document.createElement('div');
+
+    container.className =
+      'gate ' + (gate.passed ? 'pass' : 'fail');
+
+    const title = document.createElement('strong');
+    title.textContent =
+      `${gate.passed ? 'PASS' : 'NOT PASSED'} · ${gate.name}`;
+
+    const detail = document.createElement('span');
+    detail.textContent = gate.detail || '';
+
+    container.append(title, detail);
+    gates.appendChild(container);
   });
 }
-function renderGates(gates = []) {
-  const box = $('evidenceGates');
-  box.replaceChildren();
-  if (!gates.length) { box.textContent = 'No evidence-gate results returned.'; return; }
-  gates.forEach(gate => {
-    const row = document.createElement('div');
-    row.className = `gate ${gate.pass ? 'pass' : 'fail'}`;
-    const status = document.createElement('strong');
-    status.textContent = gate.pass ? 'PASS' : 'BLOCKED';
-    const content = document.createElement('div');
-    const name = document.createElement('b'); name.textContent = gate.name || 'Gate';
-    const detail = document.createElement('p'); detail.textContent = gate.detail || '';
-    content.append(name, detail); row.append(status, content); box.appendChild(row);
+
+function renderBacktest(backtest) {
+  $('backtestTarget').textContent =
+    `${fmt(backtest.targetMultiplier || 2)}x`;
+
+  $('testedPositions').textContent =
+    Number(backtest.totalEvaluatedPositions || 0)
+      .toLocaleString();
+
+  const holdout = backtest.productionHoldout || {};
+
+  $('btSamples').textContent = safe(holdout.samples);
+
+  $('btHitsMisses').textContent =
+    `${safe(holdout.hits)} / ${safe(holdout.misses)}`;
+
+  $('btHitRate').textContent = pct(holdout.hitRate);
+  $('btBaseline').textContent = pct(holdout.baselineHitRate);
+  $('btCoverage').textContent = pct(holdout.coverage);
+
+  $('backtestNote').textContent =
+    backtest.note || 'Historical diagnostics only.';
+
+  const diagnostics = backtest.diagnostics || [];
+
+  fillTable(
+    'backtestBody',
+    diagnostics.map(item => [
+      item.threshold,
+      item.development.samples,
+      pct(item.development.hitRate),
+      item.holdout.samples,
+      pct(item.holdout.hitRate),
+      pct(item.holdout.baselineHitRate),
+      pct(item.holdout.coverage)
+    ]),
+    7
+  );
+}
+
+async function fetchJson(endpoint) {
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    headers: {
+      Accept: 'application/json'
+    }
   });
-}
-function renderRounds(rounds = []) {
-  const body = $('roundsBody'); body.replaceChildren();
-  if (!rounds.length) { const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 3; td.textContent = 'No rounds returned.'; tr.appendChild(td); body.appendChild(tr); return; }
-  rounds.forEach(round => {
-    const tr = document.createElement('tr');
-    addCell(tr, round.roundId);
-    addCell(tr, round.timeUtc ? fmtTime(round.timeUtc) : '—');
-    addCell(tr, `${fmt(round.multiplier)}x`);
-    body.appendChild(tr);
-  });
-}
-function renderAnalysis(data) {
-  if (!data || data.ok !== true) throw new Error(data?.error || 'API did not return a valid analysis.');
-  clearError(); setStatus(true);
-  setText('sourceName', data.sourcePath || data.source);
-  setText('roundCount', data.summary?.samples);
-  setText('generatedAt', fmtTime(data.generatedAt));
-  setText('signalAction', data.signal?.action || 'NO SIGNAL');
-  $('signalAction').className = `action-label ${(data.signal?.action || 'NO SIGNAL').toLowerCase().replace(/\s+/g, '-')}`;
-  setText('signalScore', data.signal?.score);
-  setText('signalTarget', `Research target: next round ${data.signal?.target || '≥ 2.00x'}`);
-  setText('confidenceLabel', data.signal?.confidenceLabel || 'Evidence score, not win probability.');
-  const reasons = $('signalReasons'); reasons.replaceChildren();
-  (data.signal?.reasons || []).forEach(reason => { const li = document.createElement('li'); li.textContent = reason; reasons.appendChild(li); });
-  if (!reasons.children.length) { const li = document.createElement('li'); li.textContent = 'No additional reasons supplied.'; reasons.appendChild(li); }
 
-  const d = data.distribution || {};
-  setText('distributionSamples', `${fmt(d.samples)} rounds`);
-  setText('meanValue', d.mean == null ? '—' : `${fmt(d.mean)}x`);
-  setText('medianValue', d.median == null ? '—' : `${fmt(d.median)}x`);
-  setText('minValue', d.min == null ? '—' : `${fmt(d.min)}x`);
-  setText('maxValue', d.max == null ? '—' : `${fmt(d.max)}x`);
-  setText('atLeast2', pct(d.atLeast2)); setText('atLeast10', pct(d.atLeast10));
-  renderWindows(data.windows || {});
+  const data = await response.json();
 
-  const bt = data.backtest || {};
-  setText('backtestTarget', bt.target || 'Target ≥ 2x');
-  setText('testedPositions', bt.testedPositions);
-  setText('btSamples', bt.samples);
-  setText('btHitsMisses', `${bt.hits ?? '—'} / ${bt.misses ?? '—'}`);
-  setText('btHitRate', pct(bt.hitRate)); setText('btBaseline', pct(bt.baselineHitRate)); setText('btCoverage', pct(bt.coverage));
-  setText('backtestNote', bt.note || 'Historical walk-forward test; results do not guarantee future outcomes.');
+  if (!response.ok || data.ok === false) {
+    throw new Error(
+      data.error || `API request failed (${response.status}).`
+    );
+  }
 
-  const q = data.dataQuality || {};
-  setText('qualityStatus', q.validRounds >= 24 && !q.invalidRows && !q.duplicateRoundIds ? 'CHECKED' : 'REVIEW');
-  setText('sourceDataRows', q.sourceDataRows); setText('invalidRows', q.invalidRows); setText('duplicateIds', q.duplicateRoundIds); setText('missingTimes', q.missingTimestamps);
-  setText('columnInfo', `Multiplier: ${q.multiplierColumn || 'unknown'} · Round ID: ${q.roundIdColumn || 'row order'} · Time: ${q.timeColumn || 'not detected'} · Order: ${q.orderMethod || 'unknown'}`);
-  const warnings = $('qualityWarnings'); warnings.replaceChildren();
-  const warningItems = q.warnings?.length ? q.warnings : ['No parser warnings reported. Review source and ordering before relying on any analysis.'];
-  warningItems.forEach(w => { const li = document.createElement('li'); li.textContent = w; warnings.appendChild(li); });
-  renderGates(data.evidenceGates || []);
-  renderRounds(data.recentRounds || []);
+  return data;
 }
-async function analyze() {
-  if (busy) return;
-  busy = true; $('analyzeBtn').disabled = true; $('analyzeBtn').textContent = 'ANALYZING…';
+
+async function refresh() {
+  const button = $('analyzeBtn');
+
+  button.disabled = true;
+  button.textContent = 'Analyzing…';
+
+  showError('');
+
   try {
-    const response = await fetch(`${API_BASE}/api/analyze`, { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } });
-    let data;
-    try { data = await response.json(); } catch (_) { throw new Error(`API returned a non-JSON response (HTTP ${response.status}). Check the Render service and deployment.`); }
-    if (!response.ok || data.ok !== true) throw new Error(data.error || `API request failed with HTTP ${response.status}.`);
-    renderAnalysis(data);
+    const [analysis, backtest, history] = await Promise.all([
+      fetchJson('/api/analyze'),
+      fetchJson('/api/backtest'),
+      fetchJson('/api/history?limit=20')
+    ]);
+
+    renderAnalyze(analysis);
+    renderBacktest(backtest);
+
+    fillTable(
+      'roundsBody',
+      (history.rows || [])
+        .slice()
+        .reverse()
+        .map(row => [
+          row.roundId,
+          row.time
+            ? new Date(row.time).toLocaleString()
+            : '—',
+          `${fmt(row.multiplier)}x`
+        ]),
+      3
+    );
+
+    setApi(
+      true,
+      `API ONLINE · ${analysis.version || 'version unknown'}`
+    );
   } catch (error) {
-    setStatus(false); showError(`${error.message} API: ${API_BASE}`);
+    setApi(false, 'API OFFLINE');
+
+    showError(
+      `${error.message} Check the Render service and the API URL.`
+    );
   } finally {
-    busy = false; $('analyzeBtn').disabled = false; $('analyzeBtn').textContent = 'ANALYZE HISTORY';
+    button.disabled = false;
+    button.textContent = 'Analyze history';
   }
 }
-$('analyzeBtn').addEventListener('click', analyze);
-analyze();
+
+$('analyzeBtn').addEventListener('click', refresh);
+
+refresh();
