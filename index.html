@@ -1,25 +1,22 @@
+
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1220">
-
+  <meta name="description" content="AVIATOR AI PREDICTOR historical CSV analysis and walk-forward backtesting.">
   <title>AVIATOR AI PREDICTOR V1.1.5</title>
-
   <link rel="stylesheet" href="style.css">
   <script defer src="script.js"></script>
 </head>
 
 <body>
   <main class="shell">
-
     <header class="topbar">
       <div>
         <p class="eyebrow">HISTORICAL RESEARCH TOOL</p>
-
         <h1>AVIATOR <span>AI PREDICTOR</span></h1>
-
         <p class="subtitle">
           V1.1.5 · Collect → Analyze → Backtest → Score → Signal
         </p>
@@ -31,7 +28,7 @@
       </div>
     </header>
 
-    <div id="errorBox" class="error-box" hidden></div>
+    <div id="errorBox" class="error-box" role="alert" hidden></div>
 
     <section class="hero panel">
       <div class="section-head">
@@ -40,23 +37,15 @@
           <h2>Research status</h2>
         </div>
 
-        <button
-          id="analyzeBtn"
-          class="primary-btn"
-          type="button"
-        >
+        <button id="analyzeBtn" class="primary-btn" type="button">
           Analyze history
         </button>
       </div>
 
       <div class="signal-layout">
-
         <div class="signal-card">
           <p class="muted">Current action</p>
-
-          <div id="signalAction" class="action-label no-signal">
-            NO SIGNAL
-          </div>
+          <div id="signalAction" class="action-label no-signal">NO SIGNAL</div>
 
           <div class="score-line">
             <span id="signalScore" class="score">—</span>
@@ -75,16 +64,13 @@
 
         <div class="signal-details">
           <h3>Why this status?</h3>
-
           <ul id="signalReasons">
             <li>Waiting for API data…</li>
           </ul>
-
           <p class="small muted">
-            No score can guarantee the next multiplier.
+            A score is not a probability or a guarantee of the next multiplier.
           </p>
         </div>
-
       </div>
 
       <div class="meta-grid">
@@ -92,17 +78,14 @@
           <span class="muted">CSV source</span>
           <strong id="sourceName">—</strong>
         </div>
-
         <div>
           <span class="muted">Valid rounds</span>
           <strong id="roundCount">—</strong>
         </div>
-
         <div>
           <span class="muted">Latest multiplier</span>
           <strong id="latestValue">—</strong>
         </div>
-
         <div>
           <span class="muted">Updated</span>
           <strong id="generatedAt">—</strong>
@@ -123,27 +106,22 @@
           <span>Mean</span>
           <strong id="meanValue">—</strong>
         </div>
-
         <div class="stat">
           <span>Median</span>
           <strong id="medianValue">—</strong>
         </div>
-
         <div class="stat">
           <span>Minimum</span>
           <strong id="minValue">—</strong>
         </div>
-
         <div class="stat">
           <span>Maximum</span>
           <strong id="maxValue">—</strong>
         </div>
-
         <div class="stat">
           <span>Rounds ≥ 2x</span>
           <strong id="atLeast2">—</strong>
         </div>
-
         <div class="stat">
           <span>Rounds ≥ 10x</span>
           <strong id="atLeast10">—</strong>
@@ -161,11 +139,8 @@
               <th>≥ 3x</th>
             </tr>
           </thead>
-
           <tbody id="windowsBody">
-            <tr>
-              <td colspan="5">Waiting for data…</td>
-            </tr>
+            <tr><td colspan="5">Waiting for data…</td></tr>
           </tbody>
         </table>
       </div>
@@ -180,9 +155,9 @@
       </div>
 
       <p class="small muted">
-        The model only sees earlier rounds before each tested outcome.
-        The final 30% is held out chronologically. Results are historical
-        diagnostics, not proof of future performance.
+        Earlier rounds are used to score each test position. The final 30%
+        is held out chronologically. Results describe historical performance
+        only; they do not prove future performance.
       </p>
 
       <div class="stat-grid">
@@ -190,41 +165,33 @@
           <span>Target</span>
           <strong id="backtestTarget">2.00x</strong>
         </div>
-
         <div class="stat">
           <span>Evaluated positions</span>
           <strong id="testedPositions">—</strong>
         </div>
-
         <div class="stat">
           <span>Holdout samples</span>
           <strong id="btSamples">—</strong>
         </div>
-
         <div class="stat">
           <span>Hits / misses</span>
           <strong id="btHitsMisses">—</strong>
         </div>
-
         <div class="stat">
           <span>Hit rate</span>
           <strong id="btHitRate">—</strong>
         </div>
-
         <div class="stat">
           <span>Baseline rate</span>
           <strong id="btBaseline">—</strong>
         </div>
-
         <div class="stat">
           <span>Coverage</span>
           <strong id="btCoverage">—</strong>
         </div>
       </div>
 
-      <p id="backtestNote" class="small muted">
-        Loading backtest…
-      </p>
+      <p id="backtestNote" class="small muted">Loading backtest…</p>
 
       <div class="table-wrap">
         <table>
@@ -239,11 +206,8 @@
               <th>Coverage</th>
             </tr>
           </thead>
-
           <tbody id="backtestBody">
-            <tr>
-              <td colspan="7">Waiting for data…</td>
-            </tr>
+            <tr><td colspan="7">Waiting for data…</td></tr>
           </tbody>
         </table>
       </div>
@@ -255,38 +219,34 @@
           <p class="eyebrow">QUALITY CONTROL</p>
           <h2>Data quality and evidence gates</h2>
         </div>
-
-        <strong id="qualityStatus" class="quality-badge">
-          Checking…
-        </strong>
+        <strong id="qualityStatus" class="quality-badge">Checking…</strong>
       </div>
+
+      <p class="small muted">
+        Required source: data/aviator-2026-10 (1).csv.
+        The backend must not silently switch to another CSV.
+      </p>
 
       <div class="stat-grid">
         <div class="stat">
           <span>Source data rows</span>
           <strong id="sourceDataRows">—</strong>
         </div>
-
         <div class="stat">
           <span>Invalid rows</span>
           <strong id="invalidRows">—</strong>
         </div>
-
         <div class="stat">
           <span>Duplicate IDs</span>
           <strong id="duplicateIds">—</strong>
         </div>
-
         <div class="stat">
           <span>Missing timestamps</span>
           <strong id="missingTimes">—</strong>
         </div>
       </div>
 
-      <p id="columnInfo" class="small muted">
-        Columns: —
-      </p>
-
+      <p id="columnInfo" class="small muted">Columns: —</p>
       <ul id="qualityWarnings" class="warning-list"></ul>
 
       <div id="evidenceGates" class="gates">
@@ -311,11 +271,8 @@
               <th>Multiplier</th>
             </tr>
           </thead>
-
           <tbody id="roundsBody">
-            <tr>
-              <td colspan="3">Loading…</td>
-            </tr>
+            <tr><td colspan="3">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -324,18 +281,15 @@
     <footer>
       <p>
         <strong>Important disclaimer:</strong>
-        Historical evidence and walk-forward analysis only.
-        No guaranteed next multiplier. Aviator outcomes may be random;
-        this tool cannot know or guarantee the next result.
-        Use for research, not as financial advice or a promise of winnings.
+        Historical evidence and walk-forward analysis only. No guaranteed
+        next multiplier. Aviator outcomes may be random; this tool cannot know
+        or guarantee the next result. Use for research only.
       </p>
-
       <p class="small muted">
-        AVIATOR AI PREDICTOR V1.1.5 · No live game feed is connected;
-        the analysis reflects the CSV source shown above.
+        AVIATOR AI PREDICTOR V1.1.5 · Uses the CSV source shown above.
+        No live game feed is connected.
       </p>
     </footer>
-
   </main>
 </body>
 </html>
