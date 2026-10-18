@@ -76,6 +76,7 @@ function setApi(ok, label) {
   setText('apiStatus', label);
 
   const dot = $('statusDot');
+
   if (dot) {
     dot.classList.toggle('online', Boolean(ok));
     dot.classList.toggle('offline', !ok);
@@ -102,6 +103,7 @@ function fillTable(
   if (!Array.isArray(rows) || rows.length === 0) {
     const row = document.createElement('tr');
     const cell = makeCell(emptyText);
+
     cell.colSpan = emptyColumns;
     row.appendChild(cell);
     body.appendChild(row);
@@ -110,7 +112,11 @@ function fillTable(
 
   rows.forEach(values => {
     const row = document.createElement('tr');
-    values.forEach(value => row.appendChild(makeCell(value)));
+
+    values.forEach(value => {
+      row.appendChild(makeCell(value));
+    });
+
     body.appendChild(row);
   });
 }
@@ -119,7 +125,10 @@ function formatDate(value) {
   if (!value) return '—';
 
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '—';
+
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
 
   return date.toLocaleString();
 }
@@ -130,7 +139,9 @@ function formatDate(value) {
 
 function validateSource(data, endpointName) {
   if (!data || data.ok !== true) {
-    throw new Error(`${endpointName}: API did not return ok:true.`);
+    throw new Error(
+      `${endpointName}: API did not return ok:true.`
+    );
   }
 
   if (data.version !== 'V1.1.5') {
@@ -153,10 +164,16 @@ function validateSource(data, endpointName) {
 
 function renderAnalyze(data) {
   setText('sourceName', data.sourcePath || data.source);
-  setText('roundCount', Number(data.rounds || 0).toLocaleString());
+
+  setText(
+    'roundCount',
+    Number(data.rounds || 0).toLocaleString()
+  );
+
   setText('generatedAt', formatDate(data.generatedAt));
 
   const latest = data.latestRound || {};
+
   setText(
     'latestValue',
     latest.multiplier !== undefined
@@ -170,22 +187,28 @@ function renderAnalyze(data) {
   setText('signalAction', action);
 
   const actionElement = $('signalAction');
+
   if (actionElement) {
     actionElement.className =
-      'action-label ' + String(action).toLowerCase().replace(/\s+/g, '-');
+      'action-label ' +
+      String(action).toLowerCase().replace(/\s+/g, '-');
   }
 
   setText('signalScore', signal.score);
+
   setText(
     'signalTarget',
     `${fmt(signal.targetMultiplier ?? 2)}x`
   );
+
   setText(
     'confidenceLabel',
-    signal.confidenceLabel || 'Evidence score, not win probability'
+    signal.confidenceLabel ||
+      'Evidence score, not win probability'
   );
 
   const reasons = $('signalReasons');
+
   if (reasons) {
     reasons.replaceChildren();
 
@@ -209,7 +232,9 @@ function renderAnalyze(data) {
   setText('atLeast2', pct(distribution.atLeast2));
   setText('atLeast10', pct(distribution.atLeast10));
 
-  const windows = Array.isArray(data.windows) ? data.windows : [];
+  const windows = Array.isArray(data.windows)
+    ? data.windows
+    : [];
 
   fillTable(
     'windowsBody',
@@ -247,6 +272,7 @@ function renderQuality(data) {
   );
 
   const warnings = $('qualityWarnings');
+
   if (warnings) {
     warnings.replaceChildren();
 
@@ -254,7 +280,7 @@ function renderQuality(data) {
       ? quality.warnings
       : [];
 
-    if (list.length) {
+    if (list.length > 0) {
       list.forEach(warning => {
         const item = document.createElement('li');
         item.textContent = safe(warning);
@@ -278,6 +304,7 @@ function renderQuality(data) {
     duplicates === 0;
 
   const badge = $('qualityStatus');
+
   if (badge) {
     badge.textContent = qualityPassed
       ? 'SOURCE CHECK PASSED'
@@ -289,6 +316,7 @@ function renderQuality(data) {
   }
 
   const gates = $('evidenceGates');
+
   if (gates) {
     gates.replaceChildren();
 
@@ -298,9 +326,12 @@ function renderQuality(data) {
 
     list.forEach(gate => {
       const container = document.createElement('div');
-      container.className = 'gate ' + (gate.passed ? 'pass' : 'fail');
+
+      container.className =
+        'gate ' + (gate.passed ? 'pass' : 'fail');
 
       const title = document.createElement('strong');
+
       title.textContent =
         `${gate.passed ? 'PASS' : 'NOT PASSED'} · ${safe(gate.name)}`;
 
@@ -331,14 +362,20 @@ function renderBacktest(backtest) {
   const holdout = backtest.productionHoldout || {};
 
   setText('btSamples', holdout.samples);
+
   setText(
     'btHitsMisses',
     `${safe(holdout.hits)} / ${safe(holdout.misses)}`
   );
+
   setText('btHitRate', pct(holdout.hitRate));
   setText('btBaseline', pct(holdout.baselineHitRate));
   setText('btCoverage', pct(holdout.coverage));
-  setText('backtestNote', backtest.note || 'Historical diagnostics only.');
+
+  setText(
+    'backtestNote',
+    backtest.note || 'Historical diagnostics only.'
+  );
 
   const diagnostics = Array.isArray(backtest.diagnostics)
     ? backtest.diagnostics
@@ -369,7 +406,9 @@ function renderBacktest(backtest) {
 ========================================================= */
 
 function renderHistory(history) {
-  const rows = Array.isArray(history.rows) ? history.rows : [];
+  const rows = Array.isArray(history.rows)
+    ? history.rows
+    : [];
 
   fillTable(
     'roundsBody',
@@ -388,6 +427,7 @@ function renderHistory(history) {
 
 async function fetchJson(endpoint) {
   const controller = new AbortController();
+
   const timeout = setTimeout(
     () => controller.abort(),
     REQUEST_TIMEOUT_MS
@@ -395,7 +435,9 @@ async function fetchJson(endpoint) {
 
   try {
     const separator = endpoint.includes('?') ? '&' : '?';
-    const url = `${API_BASE}${endpoint}${separator}_=${Date.now()}`;
+
+    const url =
+      `${API_BASE}${endpoint}${separator}_=${Date.now()}`;
 
     const response = await fetch(url, {
       method: 'GET',
@@ -424,7 +466,9 @@ async function fetchJson(endpoint) {
     return data;
   } catch (error) {
     if (error && error.name === 'AbortError') {
-      throw new Error(`API request timed out after ${REQUEST_TIMEOUT_MS} ms.`);
+      throw new Error(
+        `API request timed out after ${REQUEST_TIMEOUT_MS} ms.`
+      );
     }
 
     throw error;
@@ -443,6 +487,7 @@ async function refresh() {
   const button = $('analyzeBtn');
 
   if (refreshRunning) return;
+
   refreshRunning = true;
 
   if (button) {
@@ -454,25 +499,34 @@ async function refresh() {
   setApi(false, 'CHECKING API…');
 
   try {
-    const [status, analysis, backtest, history] = await Promise.all([
-      fetchJson('/api/status'),
-      fetchJson('/api/analyze'),
-      fetchJson('/api/backtest'),
-      fetchJson('/api/history?limit=20')
-    ]);
+    const [status, analysis, backtest, history] =
+      await Promise.all([
+        fetchJson('/api/status'),
+        fetchJson('/api/analyze'),
+        fetchJson('/api/backtest'),
+        fetchJson('/api/history?limit=20')
+      ]);
 
     validateSource(status, 'Status');
     validateSource(analysis, 'Analysis');
     validateSource(backtest, 'Backtest');
     validateSource(history, 'History');
 
+    /*
+     * IMPORTANT:
+     * Compare the full-dataset round counts from status,
+     * analysis and backtest only.
+     *
+     * Do NOT compare history.rounds here because
+     * /api/history?limit=20 may return only 20 rows.
+     */
+
     if (
       Number(status.rounds) !== Number(analysis.rounds) ||
-      Number(status.rounds) !== Number(backtest.rounds) ||
-      Number(status.rounds) !== Number(history.rounds)
+      Number(status.rounds) !== Number(backtest.rounds)
     ) {
       throw new Error(
-        'Endpoint round counts do not match. Results were not rendered.'
+        'Status, analysis, and backtest round counts do not match.'
       );
     }
 
@@ -482,7 +536,8 @@ async function refresh() {
 
     setApi(
       true,
-      `API ONLINE · ${analysis.version} · ${Number(analysis.rounds).toLocaleString()} ROUNDS`
+      `API ONLINE · ${analysis.version} · ` +
+      `${Number(analysis.rounds).toLocaleString()} ROUNDS`
     );
 
     window.__AVIATOR_LAST_RESPONSE = {
@@ -524,7 +579,11 @@ function initialize() {
 }
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initialize, { once: true });
+  document.addEventListener(
+    'DOMContentLoaded',
+    initialize,
+    { once: true }
+  );
 } else {
   initialize();
 }
