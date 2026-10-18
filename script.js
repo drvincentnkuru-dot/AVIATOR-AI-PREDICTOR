@@ -1,12 +1,15 @@
+
 'use strict';
 
-const API_BASE = 'https://aviator-ai-predictor-1.onrender.com';
+// Must match the actual Render service URL for this project.
+const API_BASE = 'https://aviator-ai-predictor-v1.onrender.com';
 
 const $ = id => document.getElementById(id);
 
 const fmt = (value, digits = 2) =>
   value === null ||
   value === undefined ||
+  value === '' ||
   !Number.isFinite(Number(value))
     ? '—'
     : Number(value).toLocaleString(undefined, {
@@ -17,6 +20,7 @@ const fmt = (value, digits = 2) =>
 const pct = value =>
   value === null ||
   value === undefined ||
+  value === '' ||
   !Number.isFinite(Number(value))
     ? '—'
     : `${fmt(value)}%`;
@@ -28,13 +32,14 @@ const safe = value =>
 
 function showError(message) {
   const box = $('errorBox');
+  if (!box) return;
+
   box.textContent = message;
   box.hidden = !message;
 }
 
 function setApi(ok, label) {
   $('apiStatus').textContent = label;
-
   $('statusDot').classList.toggle('online', !!ok);
   $('statusDot').classList.toggle('offline', !ok);
 }
@@ -55,12 +60,7 @@ function addRow(tbody, values) {
   tbody.appendChild(row);
 }
 
-function fillTable(
-  id,
-  rows,
-  emptyColumns,
-  emptyText = 'No data available.'
-) {
+function fillTable(id, rows, emptyColumns, emptyText = 'No data available.') {
   const body = $(id);
   body.replaceChildren();
 
@@ -78,12 +78,8 @@ function fillTable(
 }
 
 function renderAnalyze(data) {
-  $('sourceName').textContent = safe(
-    data.sourcePath || data.source
-  );
-
-  $('roundCount').textContent =
-    Number(data.rounds || 0).toLocaleString();
+  $('sourceName').textContent = safe(data.sourcePath || data.source);
+  $('roundCount').textContent = Number(data.rounds || 0).toLocaleString();
 
   $('generatedAt').textContent = data.generatedAt
     ? new Date(data.generatedAt).toLocaleString()
@@ -95,10 +91,7 @@ function renderAnalyze(data) {
 
   const signal = data.signal || {};
 
-  $('signalAction').textContent = safe(
-    signal.action || 'NO SIGNAL'
-  );
-
+  $('signalAction').textContent = safe(signal.action || 'NO SIGNAL');
   $('signalAction').className =
     'action-label ' +
     String(signal.action || 'NO SIGNAL')
@@ -106,22 +99,17 @@ function renderAnalyze(data) {
       .replace(/\s+/g, '-');
 
   $('signalScore').textContent = safe(signal.score);
-
   $('signalTarget').textContent =
     `${fmt(signal.targetMultiplier || 2)}x`;
 
   $('confidenceLabel').textContent = safe(
-    signal.confidenceLabel ||
-    'Evidence score, not win probability'
+    signal.confidenceLabel || 'Evidence score, not win probability'
   );
 
   const reasons = $('signalReasons');
   reasons.replaceChildren();
 
-  (
-    signal.reasons ||
-    ['No explanation returned.']
-  ).forEach(reason => {
+  (signal.reasons || ['No explanation returned.']).forEach(reason => {
     const item = document.createElement('li');
     item.textContent = reason;
     reasons.appendChild(item);
@@ -148,29 +136,16 @@ function renderAnalyze(data) {
     5
   );
 
+  renderQuality(data);
+}
+
+function renderQuality(data) {
   const quality = data.dataQuality || {};
 
-  $('qualityStatus').textContent =
-    quality && quality.validRounds
-      ? (
-          quality.invalidRows === 0 &&
-          quality.duplicateRoundIds === 0
-            ? 'PASS'
-            : 'REVIEW'
-        )
-      : 'UNAVAILABLE';
-
-  $('sourceDataRows').textContent =
-    safe(quality.sourceDataRows);
-
-  $('invalidRows').textContent =
-    safe(quality.invalidRows);
-
-  $('duplicateIds').textContent =
-    safe(quality.duplicateRoundIds);
-
-  $('missingTimes').textContent =
-    safe(quality.missingTimestamps);
+  $('sourceDataRows').textContent = safe(quality.sourceDataRows);
+  $('invalidRows').textContent = safe(quality.invalidRows);
+  $('duplicateIds').textContent = safe(quality.duplicateRoundIds);
+  $('missingTimes').textContent = safe(quality.missingTimestamps);
 
   $('columnInfo').textContent =
     `Columns: multiplier=${safe(quality.multiplierColumn)}, ` +
@@ -193,18 +168,25 @@ function renderAnalyze(data) {
     warnings.appendChild(item);
   }
 
+  const invalid = Number(quality.invalidRows || 0);
+  const duplicates = Number(quality.duplicateRoundIds || 0);
+  const validRounds = Number(quality.validRounds || 0);
+  const qualityPassed =
+    validRounds >= 1000 && invalid === 0 && duplicates === 0;
+
+  const badge = $('qualityStatus');
+  badge.textContent = qualityPassed ? 'SOURCE CHECK PASSED' : 'CHECK REQUIRED';
+  badge.style.color = qualityPassed ? 'var(--green)' : 'var(--yellow)';
+
   const gates = $('evidenceGates');
   gates.replaceChildren();
 
   (data.evidenceGates || []).forEach(gate => {
     const container = document.createElement('div');
-
-    container.className =
-      'gate ' + (gate.passed ? 'pass' : 'fail');
+    container.className = 'gate ' + (gate.passed ? 'pass' : 'fail');
 
     const title = document.createElement('strong');
-    title.textContent =
-      `${gate.passed ? 'PASS' : 'NOT PASSED'} · ${gate.name}`;
+    title.textContent = `${gate.passed ? 'PASS' : 'NOT PASSED'} · ${gate.name}`;
 
     const detail = document.createElement('span');
     detail.textContent = gate.detail || '';
@@ -219,13 +201,11 @@ function renderBacktest(backtest) {
     `${fmt(backtest.targetMultiplier || 2)}x`;
 
   $('testedPositions').textContent =
-    Number(backtest.totalEvaluatedPositions || 0)
-      .toLocaleString();
+    Number(backtest.totalEvaluatedPositions || 0).toLocaleString();
 
   const holdout = backtest.productionHoldout || {};
 
   $('btSamples').textContent = safe(holdout.samples);
-
   $('btHitsMisses').textContent =
     `${safe(holdout.hits)} / ${safe(holdout.misses)}`;
 
@@ -255,12 +235,20 @@ function renderBacktest(backtest) {
 
 async function fetchJson(endpoint) {
   const response = await fetch(`${API_BASE}${endpoint}`, {
-    headers: {
-      Accept: 'application/json'
-    }
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    cache: 'no-store'
   });
 
-  const data = await response.json();
+  let data;
+
+  try {
+    data = await response.json();
+  } catch (_) {
+    throw new Error(
+      `The API returned a non-JSON response (${response.status}).`
+    );
+  }
 
   if (!response.ok || data.ok === false) {
     throw new Error(
@@ -276,15 +264,30 @@ async function refresh() {
 
   button.disabled = true;
   button.textContent = 'Analyzing…';
-
   showError('');
 
   try {
-    const [analysis, backtest, history] = await Promise.all([
+    const [status, analysis, backtest, history] = await Promise.all([
+      fetchJson('/api/status'),
       fetchJson('/api/analyze'),
       fetchJson('/api/backtest'),
       fetchJson('/api/history?limit=20')
     ]);
+
+    // Explicitly refuse to display analysis from a different source.
+    const requiredSource = 'data/aviator-2026-10 (1).csv';
+
+    if (
+      status.sourcePath !== requiredSource ||
+      analysis.sourcePath !== requiredSource ||
+      backtest.sourcePath !== requiredSource ||
+      history.sourcePath !== requiredSource
+    ) {
+      throw new Error(
+        'CSV source mismatch. Expected only ' + requiredSource +
+        '. Check the deployed backend before trusting these results.'
+      );
+    }
 
     renderAnalyze(analysis);
     renderBacktest(backtest);
@@ -296,9 +299,7 @@ async function refresh() {
         .reverse()
         .map(row => [
           row.roundId,
-          row.time
-            ? new Date(row.time).toLocaleString()
-            : '—',
+          row.time ? new Date(row.time).toLocaleString() : '—',
           `${fmt(row.multiplier)}x`
         ]),
       3
@@ -309,10 +310,10 @@ async function refresh() {
       `API ONLINE · ${analysis.version || 'version unknown'}`
     );
   } catch (error) {
-    setApi(false, 'API OFFLINE');
+    setApi(false, 'API OFFLINE / SOURCE CHECK');
 
     showError(
-      `${error.message} Check the Render service and the API URL.`
+      `${error.message} Check the Render service URL, deployment, and required large CSV.`
     );
   } finally {
     button.disabled = false;
@@ -321,5 +322,4 @@ async function refresh() {
 }
 
 $('analyzeBtn').addEventListener('click', refresh);
-
 refresh();
