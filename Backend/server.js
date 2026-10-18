@@ -1,3 +1,4 @@
+
 'use strict';
 
 const express = require('express');
@@ -16,15 +17,22 @@ const PORT = Number(process.env.PORT || 10000);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
 
+// IMPORTANT: This project uses the large research CSV ONLY.
+// Do not silently fall back to the old 58-round CSV.
+const CSV_NAME = 'aviator-2026-10 (1).csv';
+const CSV_FILE = path.join(DATA_DIR, CSV_NAME);
+
 const TARGET_MULTIPLIER = 2;
 const MIN_HISTORY = 24;
 const BACKTEST_MIN_SAMPLES = 30;
-
 const SIGNAL_THRESHOLD = 72;
 const WATCH_THRESHOLD = 60;
 const MAX_HISTORY_RESPONSE = 10000;
-
 const DIAGNOSTIC_THRESHOLDS = [50, 55, 60, 65, 68, 72];
+
+// Prevent a small or unexpected file from being mistaken for the
+// large research dataset.
+const MIN_EXPECTED_SOURCE_ROWS = 1000;
 
 const CACHE = {
   file: null,
@@ -69,6 +77,11 @@ function parseCsvLine(line) {
   }
 
   output.push(cell);
+
+  if (quoted) {
+    throw new Error('CSV contains an unclosed quoted field.');
+  }
+
   return output;
 }
 
@@ -101,7 +114,7 @@ function parseCsv(csvText) {
     .filter(line => line.trim().length > 0);
 
   if (lines.length < 2) {
-    throw new Error('CSV has no data rows.');
+    throw new Error('The required CSV has no data rows.');
   }
 
   const headers = parseCsvLine(lines[0]).map(normalizeHeader);
@@ -142,11 +155,18 @@ function parseCsv(csvText) {
   ]);
 
   if (multiplierIndex < 0) {
-    throw new Error('Could not identify the multiplier column.');
+    throw new Error(
+      'The required CSV does not contain a recognized multiplier column.'
+    );
+  }
+
+  if (roundIdIndex < 0) {
+    throw new Error(
+      'The required CSV does not contain a recognized round ID column.'
+    );
   }
 
   const rows = [];
-
   let invalidRows = 0;
   let missingTimestamps = 0;
   let missingRoundIds = 0;
@@ -160,15 +180,16 @@ function parseCsv(csvText) {
       continue;
     }
 
-    const rawId = roundIdIndex >= 0
-      ? String(cells[roundIdIndex] ?? '').trim()
-      : '';
-
+    const rawId = String(cells[roundIdIndex] ?? '').trim();
     const rawTime = timeIndex >= 0
       ? String(cells[timeIndex] ?? '').trim()
       : '';
 
-    if (!rawId) missingRoundIds++;
+    if (!rawId) {
+      missingRoundIds++;
+      invalidRows++;
+      continue;
+    }
 
     const parsedTime = rawTime ? Date.parse(rawTime) : NaN;
 
@@ -177,7 +198,7 @@ function parseCsv(csvText) {
     }
 
     rows.push({
-      roundId: rawId || String(i),
+      roundId: rawId,
       time: rawTime || null,
       timeMs: Number.isFinite(parsedTime) ? parsedTime : null,
       multiplier,
@@ -185,32 +206,31 @@ function parseCsv(csvText) {
     });
   }
 
-  const allNumericIds =
-    rows.length > 0 &&
-    rows.every(row => /^\d+$/.test(row.roundId));
-
-  if (allNumericIds) {
-    rows.sort((a, b) => Number(a.roundId) - Number(b.roundId));
-  } else {
-    const timestampCount = rows.filter(
-      row => row.timeMs !== null
-    ).length;
-
-    if (
-      rows.length > 1 &&
-      timestampCount >= Math.ceil(rows.length * 0.8)
-    ) {
-      rows.sort((a, b) => (a.timeMs ?? 0) - (b.timeMs ?? 0));
-    }
+  if (rows.length < MIN_EXPECTED_SOURCE_ROWS) {
+    throw new Error(
+      `Wrong or incomplete CSV selected: only ${rows.length} valid rounds ` +
+      `were parsed from ${CSV_NAME}. Expected the large research CSV ` +
+      `with at least ${MIN_EXPECTED_SOURCE_ROWS} valid rounds.`
+    );
   }
+
+  // The dataset has numeric round IDs. Sort chronologically by ID,
+  // not by timestamps that may be repeated or out of order.
+  const allNumericIds = rows.every(row => /^\d+$/.test(row.roundId));
+
+  if (!allNumericIds) {
+    throw new Error(
+      'The required CSV contains non-numeric round IDs; refusing to guess order.'
+    );
+  }
+
+  rows.sort((a, b) => Number(a.roundId) - Number(b.roundId));
 
   const seenIds = new Set();
   const deduplicatedRows = [];
 
   for (const row of rows) {
-    const key = /^\d+$/.test(row.roundId)
-      ? `id:${row.roundId}`
-      : row.roundId;
+    const key = row.roundId;
 
     if (seenIds.has(key)) continue;
 
@@ -218,43 +238,53 @@ function parseCsv(csvText) {
     deduplicatedRows.push(row);
   }
 
+  const duplicateRoundIds = rows.length - deduplicatedRows.length;
   const warnings = [];
 
   if (missingTimestamps) {
     warnings.push(
-      `${missingTimestamps} row(s) have missing/unparseable timestamps.`
+      `${missingTimestamps} valid round(s) have missing or unparseable timestamps.`
     );
   }
 
   if (missingRoundIds) {
     warnings.push(
-      `${missingRoundIds} row(s) have missing round IDs.`
+      `${missingRoundIds} row(s) have missing round IDs and were rejected.`
     );
   }
 
   if (invalidRows) {
     warnings.push(
-      `${invalidRows} row(s) were skipped because their multiplier was invalid.`
+      `${invalidRows} source row(s) were rejected because required data was invalid.`
     );
+  }
+
+  if (duplicateRoundIds) {
+    warnings.push(
+      `${duplicateRoundIds} duplicate round ID(s) were removed.`
+    );
+  }
+
+  if (!deduplicatedRows.length) {
+    throw new Error('The required CSV contains no usable rounds.');
   }
 
   return {
     rows: deduplicatedRows,
     quality: {
+      sourceFile: CSV_NAME,
       sourceDataRows: lines.length - 1,
       validRowsBeforeDeduplication: rows.length,
       validRounds: deduplicatedRows.length,
       invalidRows,
-      duplicateRoundIds: rows.length - deduplicatedRows.length,
+      duplicateRoundIds,
       missingTimestamps,
       missingRoundIds,
       headerColumns: headers,
       multiplierColumn: headers[multiplierIndex],
-      roundIdColumn: roundIdIndex >= 0 ? headers[roundIdIndex] : null,
+      roundIdColumn: headers[roundIdIndex],
       timeColumn: timeIndex >= 0 ? headers[timeIndex] : null,
-      orderMethod: allNumericIds
-        ? 'numeric round_id ascending'
-        : 'timestamp/source order',
+      orderMethod: 'numeric round_id ascending',
       firstRound: deduplicatedRows[0]?.roundId ?? null,
       lastRound: deduplicatedRows[deduplicatedRows.length - 1]?.roundId ?? null,
       warnings
@@ -262,91 +292,45 @@ function parseCsv(csvText) {
   };
 }
 
-function csvCandidates() {
-  if (process.env.AVIATOR_CSV_PATH) {
-    return [
-      path.resolve(ROOT_DIR, process.env.AVIATOR_CSV_PATH)
-    ];
-  }
-
-  const preferredFiles = [
-    'aviator-2026-10 (1).csv',
-    'aviator-2026-10.csv',
-    'aviator_rounds.csv'
-  ].map(name => path.join(DATA_DIR, name));
-
-  let otherFiles = [];
-
-  try {
-    otherFiles = fs.readdirSync(DATA_DIR)
-      .filter(name => name.toLowerCase().endsWith('.csv'))
-      .sort()
-      .map(name => path.join(DATA_DIR, name));
-  } catch (_) {
-    // The error is reported below if no CSV can be found.
-  }
-
-  return [...new Set([...preferredFiles, ...otherFiles])];
-}
-
 function loadData(force = false) {
-  const candidates = csvCandidates();
-  let selectedFile = null;
-
-  for (const file of candidates) {
-    try {
-      if (fs.statSync(file).isFile()) {
-        selectedFile = file;
-        break;
-      }
-    } catch (_) {
-      // Try the next candidate.
-    }
-  }
-
-  if (!selectedFile) {
-    CACHE.error =
-      `No CSV found in ${DATA_DIR}. Add the research CSV to data/ or set AVIATOR_CSV_PATH.`;
-
-    CACHE.rows = [];
-    CACHE.quality = null;
-    CACHE.file = null;
-
-    return CACHE;
-  }
-
   let stat;
 
   try {
-    stat = fs.statSync(selectedFile);
-  } catch (error) {
-    CACHE.error = error.message;
+    stat = fs.statSync(CSV_FILE);
+
+    if (!stat.isFile()) {
+      throw new Error('The required CSV path is not a file.');
+    }
+  } catch (_) {
+    CACHE.error =
+      `Required large CSV not found: data/${CSV_NAME}. ` +
+      'The API will not fall back to another CSV.';
+    CACHE.rows = [];
+    CACHE.quality = null;
+    CACHE.file = null;
     return CACHE;
   }
 
   const cacheIsCurrent =
     !force &&
-    CACHE.file === selectedFile &&
+    CACHE.file === CSV_FILE &&
     CACHE.mtimeMs === stat.mtimeMs &&
     CACHE.size === stat.size &&
     CACHE.rows.length > 0;
 
-  if (cacheIsCurrent) {
-    return CACHE;
-  }
+  if (cacheIsCurrent) return CACHE;
 
   try {
-    const parsed = parseCsv(
-      fs.readFileSync(selectedFile, 'utf8')
-    );
+    const text = fs.readFileSync(CSV_FILE, 'utf8');
+    const parsed = parseCsv(text);
 
-    CACHE.file = selectedFile;
+    CACHE.file = CSV_FILE;
     CACHE.mtimeMs = stat.mtimeMs;
     CACHE.size = stat.size;
     CACHE.loadedAt = new Date().toISOString();
     CACHE.rows = parsed.rows;
     CACHE.quality = {
-      sourceFile: path.basename(selectedFile),
+      fileBytes: stat.size,
       ...parsed.quality
     };
     CACHE.error = null;
@@ -354,6 +338,7 @@ function loadData(force = false) {
     CACHE.error = error.message;
     CACHE.rows = [];
     CACHE.quality = null;
+    CACHE.file = null;
   }
 
   return CACHE;
@@ -383,22 +368,6 @@ function rateAtLeast(rows, target = TARGET_MULTIPLIER) {
     rows.length * 100;
 }
 
-function longestStreak(rows, predicate) {
-  let best = 0;
-  let current = 0;
-
-  for (const row of rows) {
-    if (predicate(row)) {
-      current++;
-      best = Math.max(best, current);
-    } else {
-      current = 0;
-    }
-  }
-
-  return best;
-}
-
 function currentStreak(rows, predicate) {
   let count = 0;
 
@@ -411,7 +380,7 @@ function currentStreak(rows, predicate) {
 }
 
 function scoreAt(rows, endIndex) {
-  // The score may only use rows before endIndex.
+  // Only use earlier rows. rows[endIndex] is the outcome to be tested.
   const history = rows.slice(0, endIndex);
 
   if (history.length < MIN_HISTORY) {
@@ -425,7 +394,6 @@ function scoreAt(rows, endIndex) {
   const rate6 = rateAtLeast(window6);
   const rate12 = rateAtLeast(window12);
   const rate24 = rateAtLeast(window24);
-
   const latest = history[history.length - 1];
 
   const lowCurrentStreak = currentStreak(
@@ -433,7 +401,7 @@ function scoreAt(rows, endIndex) {
     row => row.multiplier < 1.5
   );
 
-  // This is a descriptive evidence score, not a win probability.
+  // Descriptive historical score only; it is not a win probability.
   let score = 50;
 
   score += (rate6 - 50) * 0.40;
@@ -444,13 +412,8 @@ function scoreAt(rows, endIndex) {
     score -= Math.min(8, (lowCurrentStreak - 2) * 2);
   }
 
-  if (latest.multiplier >= 10) {
-    score -= 2;
-  }
-
-  if (latest.multiplier < 1.2) {
-    score += 1;
-  }
+  if (latest.multiplier >= 10) score -= 2;
+  if (latest.multiplier < 1.2) score += 1;
 
   score = Math.max(0, Math.min(100, Math.round(score)));
 
@@ -478,10 +441,7 @@ function evaluateThreshold(evaluations, threshold) {
   ).length;
 
   const misses = selected.length - hits;
-
-  const hitRate = selected.length
-    ? hits / selected.length * 100
-    : null;
+  const hitRate = selected.length ? hits / selected.length * 100 : null;
 
   const baseline = rateAtLeast(
     evaluations.map(item => ({ multiplier: item.actualNext })),
@@ -496,9 +456,7 @@ function evaluateThreshold(evaluations, threshold) {
     hitRate,
     baselineHitRate: baseline,
     liftPercentagePoints:
-      hitRate === null || baseline === null
-        ? null
-        : hitRate - baseline,
+      hitRate === null || baseline === null ? null : hitRate - baseline,
     coverage: evaluations.length
       ? selected.length / evaluations.length * 100
       : 0,
@@ -514,13 +472,8 @@ function evaluateThreshold(evaluations, threshold) {
 function createEvaluations(rows) {
   const evaluations = [];
 
-  /*
-   * Correct walk-forward alignment:
-   * At index i, the model sees rows [0 ... i-1].
-   * The outcome being tested is rows[i].
-   *
-   * This prevents using the wrong future round as the target.
-   */
+  // At index i, only rows before i are visible to the score.
+  // rows[i] is the actual outcome tested by the backtest.
   for (let i = MIN_HISTORY; i < rows.length; i++) {
     const result = scoreAt(rows, i);
 
@@ -540,7 +493,6 @@ function createEvaluations(rows) {
 
 function backtest(rows) {
   const evaluations = createEvaluations(rows);
-
   const split = Math.floor(evaluations.length * 0.7);
 
   const development = evaluations.slice(0, split);
@@ -553,12 +505,12 @@ function backtest(rows) {
     overall: evaluateThreshold(evaluations, threshold)
   }));
 
-  const production = evaluateThreshold(
+  const productionHoldout = evaluateThreshold(
     holdout,
     SIGNAL_THRESHOLD
   );
 
-  const watch = evaluateThreshold(
+  const watchHoldout = evaluateThreshold(
     holdout,
     WATCH_THRESHOLD
   );
@@ -573,8 +525,8 @@ function backtest(rows) {
     split: 'Chronological 70% development / 30% holdout',
     productionThreshold: SIGNAL_THRESHOLD,
     watchThreshold: WATCH_THRESHOLD,
-    productionHoldout: production,
-    watchHoldout: watch,
+    productionHoldout,
+    watchHoldout,
     diagnostics,
     scoreDiagnostics: {
       min: scores.length ? Math.min(...scores) : null,
@@ -583,7 +535,7 @@ function backtest(rows) {
       countAtLeast72: scores.filter(score => score >= 72).length
     },
     note:
-      'Walk-forward historical diagnostics only. Holdout results are descriptive, not proof of future performance. Thresholds are fixed in advance; no guarantee of the next multiplier.'
+      'Walk-forward historical diagnostics only. Holdout results are descriptive, not proof of future performance. No guarantee of the next multiplier.'
   };
 }
 
@@ -602,47 +554,62 @@ function analyze(rows) {
 
   const result = scoreAt(rows, rows.length);
   const backtestResult = backtest(rows);
-
-  const enoughHistory = rows.length >= MIN_HISTORY;
   const production = backtestResult.productionHoldout;
 
-  const evidencePass =
-    production.meetsMinimumSamples &&
-    production.aboveBaseline;
+  const enoughHistory = rows.length >= MIN_HISTORY;
+  const dataQualityPass =
+    !!CACHE.quality &&
+    CACHE.quality.invalidRows === 0 &&
+    CACHE.quality.duplicateRoundIds === 0 &&
+    CACHE.quality.validRounds >= MIN_EXPECTED_SOURCE_ROWS;
+
+  const samplePass = production.meetsMinimumSamples;
+  const baselinePass = production.aboveBaseline;
+  const evidencePass = samplePass && baselinePass && dataQualityPass;
 
   let action = 'NO SIGNAL';
   const reasons = [];
 
   if (!enoughHistory) {
-    reasons.push(
-      `At least ${MIN_HISTORY} historical rounds are required.`
-    );
+    reasons.push(`At least ${MIN_HISTORY} historical rounds are required.`);
   }
 
   if (enoughHistory && result.score < WATCH_THRESHOLD) {
+    reasons.push('Current evidence score is below the watch threshold.');
+  }
+
+  if (!samplePass) {
     reasons.push(
-      'Current evidence score is below the watch threshold.'
+      'Holdout does not contain the required minimum number of selected backtest samples.'
     );
   }
 
-  if (!evidencePass) {
+  if (!baselinePass) {
     reasons.push(
-      'Holdout evidence does not satisfy both the minimum sample and above-baseline gates.'
+      'The selected holdout hit rate does not exceed its historical baseline.'
+    );
+  }
+
+  if (!dataQualityPass) {
+    reasons.push(
+      'The CSV quality gate failed. A signal is blocked until the source data passes validation.'
     );
   }
 
   if (
     enoughHistory &&
     evidencePass &&
+    result.score !== null &&
     result.score >= SIGNAL_THRESHOLD
   ) {
     action = 'SIGNAL';
     reasons.push(
-      'The configured evidence gates passed; this is still not a prediction guarantee.'
+      'Configured evidence gates passed; this is still not a prediction guarantee.'
     );
   } else if (
     enoughHistory &&
     evidencePass &&
+    result.score !== null &&
     result.score >= WATCH_THRESHOLD
   ) {
     action = 'WATCH';
@@ -651,13 +618,15 @@ function analyze(rows) {
     );
   }
 
+  if (action === 'NO SIGNAL' && reasons.length === 0) {
+    reasons.push('Current evidence is insufficient; no signal is issued.');
+  }
+
   return {
     ok: true,
     version: VERSION,
-    source: path.basename(CACHE.file || ''),
-    sourcePath: CACHE.file
-      ? path.relative(ROOT_DIR, CACHE.file).split(path.sep).join('/')
-      : null,
+    source: CSV_NAME,
+    sourcePath: 'data/' + CSV_NAME,
     loadedAt: CACHE.loadedAt,
     generatedAt: new Date().toISOString(),
     rounds: rows.length,
@@ -720,26 +689,23 @@ function analyze(rows) {
       },
       {
         name: 'Holdout backtest sample count',
-        passed: production.meetsMinimumSamples,
+        passed: samplePass,
         detail:
           `${production.samples} selected holdout signals; minimum ${BACKTEST_MIN_SAMPLES}`
       },
       {
         name: 'Holdout above baseline',
-        passed: production.aboveBaseline,
+        passed: baselinePass,
         detail:
           `${production.hitRate === null ? 'n/a' : production.hitRate.toFixed(2) + '%'} hit rate vs ` +
           `${production.baselineHitRate === null ? 'n/a' : production.baselineHitRate.toFixed(2) + '%'} baseline`
       },
       {
-        name: 'Data quality',
-        passed:
-          !!CACHE.quality &&
-          CACHE.quality.invalidRows === 0 &&
-          CACHE.quality.duplicateRoundIds === 0,
+        name: 'Large CSV data quality',
+        passed: dataQualityPass,
         detail: CACHE.quality
-          ? `${CACHE.quality.invalidRows} invalid, ${CACHE.quality.duplicateRoundIds} duplicate IDs`
-          : 'CSV unavailable'
+          ? `${CACHE.quality.validRounds} valid rounds; ${CACHE.quality.invalidRows} invalid rows; ${CACHE.quality.duplicateRoundIds} duplicate IDs`
+          : 'Required CSV unavailable'
       }
     ],
 
@@ -759,13 +725,23 @@ function analyze(rows) {
   };
 }
 
+function apiError(res, data) {
+  return res.status(503).json({
+    ok: false,
+    version: VERSION,
+    source: CSV_NAME,
+    error: data.error || 'Required large CSV could not be loaded.'
+  });
+}
+
 app.get('/', (_req, res) => {
   res.json({
     ok: true,
     name: 'AVIATOR AI PREDICTOR',
     version: VERSION,
+    csvSource: 'data/' + CSV_NAME,
     message:
-      'Use /api/analyze, /api/history, /api/status or /api/backtest.'
+      'Historical research API. Use /api/status, /api/analyze, /api/backtest or /api/history.'
   });
 });
 
@@ -774,16 +750,14 @@ app.get('/api/status', (_req, res) => {
 
   res.status(data.error ? 503 : 200).json({
     ok: !data.error,
+    name: 'AVIATOR AI PREDICTOR',
     version: VERSION,
-    source: data.file ? path.basename(data.file) : null,
-    sourcePath: data.file
-      ? path.relative(ROOT_DIR, data.file).split(path.sep).join('/')
-      : null,
+    source: CSV_NAME,
+    sourcePath: 'data/' + CSV_NAME,
     loadedAt: data.loadedAt,
     rounds: data.rows.length,
     dataQuality: data.quality,
     error: data.error,
-    csvPathOverrideSet: !!process.env.AVIATOR_CSV_PATH,
     generatedAt: new Date().toISOString()
   });
 });
@@ -791,13 +765,7 @@ app.get('/api/status', (_req, res) => {
 app.get('/api/analyze', (_req, res) => {
   const data = loadData();
 
-  if (data.error) {
-    return res.status(503).json({
-      ok: false,
-      version: VERSION,
-      error: data.error
-    });
-  }
+  if (data.error) return apiError(res, data);
 
   res.json(analyze(data.rows));
 });
@@ -805,17 +773,14 @@ app.get('/api/analyze', (_req, res) => {
 app.get('/api/backtest', (_req, res) => {
   const data = loadData();
 
-  if (data.error) {
-    return res.status(503).json({
-      ok: false,
-      version: VERSION,
-      error: data.error
-    });
-  }
+  if (data.error) return apiError(res, data);
 
   res.json({
     ok: true,
     version: VERSION,
+    source: CSV_NAME,
+    sourcePath: 'data/' + CSV_NAME,
+    rounds: data.rows.length,
     ...backtest(data.rows)
   });
 });
@@ -823,17 +788,9 @@ app.get('/api/backtest', (_req, res) => {
 app.get('/api/history', (req, res) => {
   const data = loadData();
 
-  if (data.error) {
-    return res.status(503).json({
-      ok: false,
-      version: VERSION,
-      error: data.error
-    });
-  }
+  if (data.error) return apiError(res, data);
 
-  const requestedLimit =
-    Number.parseInt(req.query.limit, 10) || 100;
-
+  const requestedLimit = Number.parseInt(req.query.limit, 10) || 100;
   const limit = Math.max(
     1,
     Math.min(MAX_HISTORY_RESPONSE, requestedLimit)
@@ -848,6 +805,8 @@ app.get('/api/history', (req, res) => {
   res.json({
     ok: true,
     version: VERSION,
+    source: CSV_NAME,
+    sourcePath: 'data/' + CSV_NAME,
     total: data.rows.length,
     returned: rows.length,
     rows
@@ -860,7 +819,8 @@ app.post('/api/reload', (_req, res) => {
   res.status(data.error ? 503 : 200).json({
     ok: !data.error,
     version: VERSION,
-    source: data.file ? path.basename(data.file) : null,
+    source: CSV_NAME,
+    sourcePath: 'data/' + CSV_NAME,
     rounds: data.rows.length,
     error: data.error,
     loadedAt: data.loadedAt
@@ -878,8 +838,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(
-    `AVIATOR AI PREDICTOR ${VERSION} listening on port ${PORT}`
-  );
-  console.log(`CSV directory: ${DATA_DIR}`);
+  console.log(`AVIATOR AI PREDICTOR ${VERSION} listening on port ${PORT}`);
+  console.log(`Required CSV: ${CSV_FILE}`);
+  console.log('CSV fallback is disabled.');
 });
