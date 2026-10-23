@@ -7,32 +7,26 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// Keep compatibility with the existing V1.1.5 frontend.
 const VERSION = 'V1.1.5';
 const PORT = Number(process.env.PORT || 10000);
-
 const ROOT_DIR = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(ROOT_DIR, 'data');
 
-// IMPORTANT: This project uses the large research CSV ONLY.
-// Do not silently fall back to the old 58-round CSV.
+// Use the large CSV ONLY. Never fall back to the old 58-round file.
 const CSV_NAME = 'aviator-2026-10 (1).csv';
-const CSV_FILE = path.join(DATA_DIR, CSV_NAME);
+const CSV_FILE = path.join(ROOT_DIR, 'data', CSV_NAME);
 
 const TARGET_MULTIPLIER = 2;
 const MIN_HISTORY = 24;
 const BACKTEST_MIN_SAMPLES = 30;
 const SIGNAL_THRESHOLD = 72;
 const WATCH_THRESHOLD = 60;
+const MIN_EXPECTED_SOURCE_ROWS = 1000;
 const MAX_HISTORY_RESPONSE = 10000;
 const DIAGNOSTIC_THRESHOLDS = [50, 55, 60, 65, 68, 72];
-
-// Prevent a small or unexpected file from being mistaken for the
-// large research dataset.
-const MIN_EXPECTED_SOURCE_ROWS = 1000;
 
 const CACHE = {
   file: null,
@@ -59,111 +53,80 @@ function parseCsvLine(line) {
   let quoted = false;
 
   for (let i = 0; i < line.length; i++) {
-    const char = line[i];
+    const ch = line[i];
 
-    if (char === '"') {
+    if (ch === '"') {
       if (quoted && line[i + 1] === '"') {
         cell += '"';
         i++;
       } else {
         quoted = !quoted;
       }
-    } else if (char === ',' && !quoted) {
+    } else if (ch === ',' && !quoted) {
       output.push(cell);
       cell = '';
     } else {
-      cell += char;
+      cell += ch;
     }
   }
-
-  output.push(cell);
 
   if (quoted) {
     throw new Error('CSV contains an unclosed quoted field.');
   }
 
+  output.push(cell);
   return output;
 }
 
 function parseMultiplier(raw) {
-  const text = String(raw ?? '')
+  const s = String(raw ?? '')
     .trim()
     .replace(/[xX]$/, '')
     .replace(/\s/g, '')
     .replace(',', '.');
 
-  if (!text) return null;
+  if (!s) return null;
 
-  const number = Number(text);
+  const n = Number(s);
 
-  if (
-    !Number.isFinite(number) ||
-    number < 1 ||
-    number > 1000000
-  ) {
-    return null;
-  }
-
-  return Math.round(number * 10000) / 10000;
+  return Number.isFinite(n) && n >= 1 && n <= 1000000
+    ? Math.round(n * 10000) / 10000
+    : null;
 }
 
 function parseCsv(csvText) {
   const lines = String(csvText)
     .replace(/^\uFEFF/, '')
     .split(/\r?\n/)
-    .filter(line => line.trim().length > 0);
+    .filter(line => line.trim());
 
   if (lines.length < 2) {
     throw new Error('The required CSV has no data rows.');
   }
 
   const headers = parseCsvLine(lines[0]).map(normalizeHeader);
+  const find = aliases => headers.findIndex(h => aliases.includes(h));
 
-  const findColumn = aliases =>
-    headers.findIndex(header => aliases.includes(header));
-
-  const multiplierIndex = findColumn([
-    'crash_multiplier',
-    'multiplier',
-    'crash',
-    'crashpoint',
-    'crash_point',
-    'value',
-    'coefficient',
-    'result',
-    'x',
-    'outcome'
+  const multiplierIndex = find([
+    'crash_multiplier', 'multiplier', 'crash', 'crashpoint',
+    'crash_point', 'value', 'coefficient', 'result', 'x', 'outcome'
   ]);
 
-  const roundIdIndex = findColumn([
-    'round_id',
-    'round',
-    'roundid',
-    'game_id',
-    'id',
-    'round_number'
+  const roundIdIndex = find([
+    'round_id', 'round', 'roundid', 'game_id', 'id', 'round_number'
   ]);
 
-  const timeIndex = findColumn([
-    'time_utc',
-    'timestamp',
-    'time',
-    'date',
-    'datetime',
-    'created_at',
-    'createdat'
+  const timeIndex = find([
+    'time_utc', 'timestamp', 'time', 'date',
+    'datetime', 'created_at', 'createdat'
   ]);
 
   if (multiplierIndex < 0) {
-    throw new Error(
-      'The required CSV does not contain a recognized multiplier column.'
-    );
+    throw new Error('The required CSV has no recognized multiplier column.');
   }
 
   if (roundIdIndex < 0) {
-    throw new Error(
-      'The required CSV does not contain a recognized round ID column.'
-    );
+    throw new Error('The required CSV has no recognized round ID column.');
   }
 
   const rows = [];
@@ -180,12 +143,12 @@ function parseCsv(csvText) {
       continue;
     }
 
-    const rawId = String(cells[roundIdIndex] ?? '').trim();
+    const roundId = String(cells[roundIdIndex] ?? '').trim();
     const rawTime = timeIndex >= 0
       ? String(cells[timeIndex] ?? '').trim()
       : '';
 
-    if (!rawId) {
+    if (!roundId) {
       missingRoundIds++;
       invalidRows++;
       continue;
@@ -198,7 +161,7 @@ function parseCsv(csvText) {
     }
 
     rows.push({
-      roundId: rawId,
+      roundId,
       time: rawTime || null,
       timeMs: Number.isFinite(parsedTime) ? parsedTime : null,
       multiplier,
@@ -209,36 +172,27 @@ function parseCsv(csvText) {
   if (rows.length < MIN_EXPECTED_SOURCE_ROWS) {
     throw new Error(
       `Wrong or incomplete CSV selected: only ${rows.length} valid rounds ` +
-      `were parsed from ${CSV_NAME}. Expected the large research CSV ` +
-      `with at least ${MIN_EXPECTED_SOURCE_ROWS} valid rounds.`
+      `were parsed from ${CSV_NAME}. Expected at least ${MIN_EXPECTED_SOURCE_ROWS}.`
     );
   }
 
-  // The dataset has numeric round IDs. Sort chronologically by ID,
-  // not by timestamps that may be repeated or out of order.
-  const allNumericIds = rows.every(row => /^\d+$/.test(row.roundId));
-
-  if (!allNumericIds) {
+  if (!rows.every(row => /^\d+$/.test(row.roundId))) {
     throw new Error(
       'The required CSV contains non-numeric round IDs; refusing to guess order.'
     );
   }
 
+  // Sort by numeric round ID, then remove duplicate IDs.
   rows.sort((a, b) => Number(a.roundId) - Number(b.roundId));
 
-  const seenIds = new Set();
-  const deduplicatedRows = [];
+  const seen = new Set();
+  const unique = rows.filter(row => {
+    if (seen.has(row.roundId)) return false;
+    seen.add(row.roundId);
+    return true;
+  });
 
-  for (const row of rows) {
-    const key = row.roundId;
-
-    if (seenIds.has(key)) continue;
-
-    seenIds.add(key);
-    deduplicatedRows.push(row);
-  }
-
-  const duplicateRoundIds = rows.length - deduplicatedRows.length;
+  const duplicateRoundIds = rows.length - unique.length;
   const warnings = [];
 
   if (missingTimestamps) {
@@ -248,34 +202,24 @@ function parseCsv(csvText) {
   }
 
   if (missingRoundIds) {
-    warnings.push(
-      `${missingRoundIds} row(s) have missing round IDs and were rejected.`
-    );
+    warnings.push(`${missingRoundIds} row(s) with missing round IDs were rejected.`);
   }
 
   if (invalidRows) {
-    warnings.push(
-      `${invalidRows} source row(s) were rejected because required data was invalid.`
-    );
+    warnings.push(`${invalidRows} source row(s) were rejected due to invalid data.`);
   }
 
   if (duplicateRoundIds) {
-    warnings.push(
-      `${duplicateRoundIds} duplicate round ID(s) were removed.`
-    );
-  }
-
-  if (!deduplicatedRows.length) {
-    throw new Error('The required CSV contains no usable rounds.');
+    warnings.push(`${duplicateRoundIds} duplicate round ID(s) were removed.`);
   }
 
   return {
-    rows: deduplicatedRows,
+    rows: unique,
     quality: {
       sourceFile: CSV_NAME,
       sourceDataRows: lines.length - 1,
       validRowsBeforeDeduplication: rows.length,
-      validRounds: deduplicatedRows.length,
+      validRounds: unique.length,
       invalidRows,
       duplicateRoundIds,
       missingTimestamps,
@@ -285,60 +229,49 @@ function parseCsv(csvText) {
       roundIdColumn: headers[roundIdIndex],
       timeColumn: timeIndex >= 0 ? headers[timeIndex] : null,
       orderMethod: 'numeric round_id ascending',
-      firstRound: deduplicatedRows[0]?.roundId ?? null,
-      lastRound: deduplicatedRows[deduplicatedRows.length - 1]?.roundId ?? null,
+      firstRound: unique[0]?.roundId ?? null,
+      lastRound: unique[unique.length - 1]?.roundId ?? null,
       warnings
     }
   };
 }
 
 function loadData(force = false) {
-  let stat;
-
   try {
-    stat = fs.statSync(CSV_FILE);
+    const stat = fs.statSync(CSV_FILE);
 
     if (!stat.isFile()) {
       throw new Error('The required CSV path is not a file.');
     }
-  } catch (_) {
-    CACHE.error =
-      `Required large CSV not found: data/${CSV_NAME}. ` +
-      'The API will not fall back to another CSV.';
-    CACHE.rows = [];
-    CACHE.quality = null;
-    CACHE.file = null;
-    return CACHE;
-  }
 
-  const cacheIsCurrent =
-    !force &&
-    CACHE.file === CSV_FILE &&
-    CACHE.mtimeMs === stat.mtimeMs &&
-    CACHE.size === stat.size &&
-    CACHE.rows.length > 0;
+    if (
+      !force &&
+      CACHE.file === CSV_FILE &&
+      CACHE.mtimeMs === stat.mtimeMs &&
+      CACHE.size === stat.size &&
+      CACHE.rows.length
+    ) {
+      return CACHE;
+    }
 
-  if (cacheIsCurrent) return CACHE;
+    const parsed = parseCsv(fs.readFileSync(CSV_FILE, 'utf8'));
 
-  try {
-    const text = fs.readFileSync(CSV_FILE, 'utf8');
-    const parsed = parseCsv(text);
-
-    CACHE.file = CSV_FILE;
-    CACHE.mtimeMs = stat.mtimeMs;
-    CACHE.size = stat.size;
-    CACHE.loadedAt = new Date().toISOString();
-    CACHE.rows = parsed.rows;
-    CACHE.quality = {
-      fileBytes: stat.size,
-      ...parsed.quality
-    };
-    CACHE.error = null;
+    Object.assign(CACHE, {
+      file: CSV_FILE,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      loadedAt: new Date().toISOString(),
+      rows: parsed.rows,
+      quality: { fileBytes: stat.size, ...parsed.quality },
+      error: null
+    });
   } catch (error) {
-    CACHE.error = error.message;
-    CACHE.rows = [];
-    CACHE.quality = null;
-    CACHE.file = null;
+    Object.assign(CACHE, {
+      error: `Required large CSV unavailable: data/${CSV_NAME}. ${error.message}`,
+      rows: [],
+      quality: null,
+      file: null
+    });
   }
 
   return CACHE;
@@ -346,7 +279,7 @@ function loadData(force = false) {
 
 function mean(values) {
   return values.length
-    ? values.reduce((sum, value) => sum + value, 0) / values.length
+    ? values.reduce((a, b) => a + b, 0) / values.length
     : null;
 }
 
@@ -354,62 +287,63 @@ function median(values) {
   if (!values.length) return null;
 
   const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
+  const mid = Math.floor(sorted.length / 2);
 
   return sorted.length % 2
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function rateAtLeast(rows, target = TARGET_MULTIPLIER) {
-  if (!rows.length) return null;
-
-  return rows.filter(row => row.multiplier >= target).length /
-    rows.length * 100;
+  return rows.length
+    ? rows.filter(row => row.multiplier >= target).length / rows.length * 100
+    : null;
 }
 
 function currentStreak(rows, predicate) {
   let count = 0;
 
-  for (let i = rows.length - 1; i >= 0; i--) {
-    if (!predicate(rows[i])) break;
+  for (
+    let i = rows.length - 1;
+    i >= 0 && predicate(rows[i]);
+    i--
+  ) {
     count++;
   }
 
   return count;
 }
 
+// Score each historical position using only rounds before that position.
 function scoreAt(rows, endIndex) {
-  // Only use earlier rows. rows[endIndex] is the outcome to be tested.
   const history = rows.slice(0, endIndex);
 
   if (history.length < MIN_HISTORY) {
     return { score: null, features: null };
   }
 
-  const window6 = history.slice(-6);
-  const window12 = history.slice(-12);
-  const window24 = history.slice(-24);
+  const w6 = history.slice(-6);
+  const w12 = history.slice(-12);
+  const w24 = history.slice(-24);
 
-  const rate6 = rateAtLeast(window6);
-  const rate12 = rateAtLeast(window12);
-  const rate24 = rateAtLeast(window24);
+  const r6 = rateAtLeast(w6);
+  const r12 = rateAtLeast(w12);
+  const r24 = rateAtLeast(w24);
+
   const latest = history[history.length - 1];
-
-  const lowCurrentStreak = currentStreak(
+  const lowStreak = currentStreak(
     history,
     row => row.multiplier < 1.5
   );
 
-  // Descriptive historical score only; it is not a win probability.
-  let score = 50;
+  let score =
+    50 +
+    (r6 - 50) * 0.40 +
+    (r12 - 50) * 0.30 +
+    (r24 - 50) * 0.20;
 
-  score += (rate6 - 50) * 0.40;
-  score += (rate12 - 50) * 0.30;
-  score += (rate24 - 50) * 0.20;
-
-  if (lowCurrentStreak >= 3) {
-    score -= Math.min(8, (lowCurrentStreak - 2) * 2);
+  if (lowStreak >= 3) {
+    score -= Math.min(8, (lowStreak - 2) * 2);
   }
 
   if (latest.multiplier >= 10) score -= 2;
@@ -421,14 +355,34 @@ function scoreAt(rows, endIndex) {
     score,
     features: {
       sampleCount: history.length,
-      rate2x6: rate6,
-      rate2x12: rate12,
-      rate2x24: rate24,
-      lowCurrentStreak,
-      recentMean: mean(window6.map(row => row.multiplier)),
+      rate2x6: r6,
+      rate2x12: r12,
+      rate2x24: r24,
+      lowCurrentStreak: lowStreak,
+      recentMean: mean(w6.map(row => row.multiplier)),
       latestMultiplier: latest.multiplier
     }
   };
+}
+
+function createEvaluations(rows) {
+  const output = [];
+
+  for (let i = MIN_HISTORY; i < rows.length; i++) {
+    const result = scoreAt(rows, i);
+
+    if (result.score !== null) {
+      output.push({
+        position: i,
+        referenceRoundId: rows[i - 1].roundId,
+        roundId: rows[i].roundId,
+        score: result.score,
+        actualNext: rows[i].multiplier
+      });
+    }
+  }
+
+  return output;
 }
 
 function evaluateThreshold(evaluations, threshold) {
@@ -461,34 +415,9 @@ function evaluateThreshold(evaluations, threshold) {
       ? selected.length / evaluations.length * 100
       : 0,
     meetsMinimumSamples: selected.length >= BACKTEST_MIN_SAMPLES,
-    aboveBaseline:
-      hitRate !== null &&
-      baseline !== null &&
-      hitRate > baseline,
+    aboveBaseline: hitRate !== null && baseline !== null && hitRate > baseline,
     diagnosticOnly: true
   };
-}
-
-function createEvaluations(rows) {
-  const evaluations = [];
-
-  // At index i, only rows before i are visible to the score.
-  // rows[i] is the actual outcome tested by the backtest.
-  for (let i = MIN_HISTORY; i < rows.length; i++) {
-    const result = scoreAt(rows, i);
-
-    if (result.score === null) continue;
-
-    evaluations.push({
-      position: i,
-      referenceRoundId: rows[i - 1].roundId,
-      roundId: rows[i].roundId,
-      score: result.score,
-      actualNext: rows[i].multiplier
-    });
-  }
-
-  return evaluations;
 }
 
 function backtest(rows) {
@@ -505,16 +434,8 @@ function backtest(rows) {
     overall: evaluateThreshold(evaluations, threshold)
   }));
 
-  const productionHoldout = evaluateThreshold(
-    holdout,
-    SIGNAL_THRESHOLD
-  );
-
-  const watchHoldout = evaluateThreshold(
-    holdout,
-    WATCH_THRESHOLD
-  );
-
+  const productionHoldout = evaluateThreshold(holdout, SIGNAL_THRESHOLD);
+  const watchHoldout = evaluateThreshold(holdout, WATCH_THRESHOLD);
   const scores = evaluations.map(item => item.score);
 
   return {
@@ -535,7 +456,8 @@ function backtest(rows) {
       countAtLeast72: scores.filter(score => score >= 72).length
     },
     note:
-      'Walk-forward historical diagnostics only. Holdout results are descriptive, not proof of future performance. No guarantee of the next multiplier.'
+      'Walk-forward historical diagnostics only. Holdout results are descriptive, ' +
+      'not proof of future performance. No guarantee of the next multiplier.'
   };
 }
 
@@ -553,10 +475,11 @@ function analyze(rows) {
   const previous = rows[rows.length - 2] || null;
 
   const result = scoreAt(rows, rows.length);
-  const backtestResult = backtest(rows);
-  const production = backtestResult.productionHoldout;
+  const bt = backtest(rows);
+  const production = bt.productionHoldout;
 
   const enoughHistory = rows.length >= MIN_HISTORY;
+
   const dataQualityPass =
     !!CACHE.quality &&
     CACHE.quality.invalidRows === 0 &&
@@ -575,7 +498,9 @@ function analyze(rows) {
   }
 
   if (enoughHistory && result.score < WATCH_THRESHOLD) {
-    reasons.push('Current evidence score is below the watch threshold.');
+    reasons.push(
+      'Current evidence score is below the watch threshold; this is not a positive betting signal.'
+    );
   }
 
   if (!samplePass) {
@@ -616,6 +541,12 @@ function analyze(rows) {
     reasons.push(
       'Evidence qualifies for watch-only status, not a guaranteed outcome.'
     );
+  } else if (enoughHistory && dataQualityPass) {
+    // WATCH here means review/monitor only, never a confirmed betting signal.
+    action = 'WATCH';
+    reasons.push(
+      'Analysis completed: WATCH is a review status only because one or more evidence gates did not pass. Do not treat this as a confirmed betting signal.'
+    );
   }
 
   if (action === 'NO SIGNAL' && reasons.length === 0) {
@@ -626,7 +557,7 @@ function analyze(rows) {
     ok: true,
     version: VERSION,
     source: CSV_NAME,
-    sourcePath: 'data/' + CSV_NAME,
+    sourcePath: `data/${CSV_NAME}`,
     loadedAt: CACHE.loadedAt,
     generatedAt: new Date().toISOString(),
     rounds: rows.length,
@@ -663,10 +594,8 @@ function analyze(rows) {
       atLeast3: rateAtLeast(rows, 3),
       atLeast5: rateAtLeast(rows, 5),
       atLeast10: rateAtLeast(rows, 10),
-      below1_2: values.filter(value => value < 1.2).length /
-        values.length * 100,
-      below1_5: values.filter(value => value < 1.5).length /
-        values.length * 100
+      below1_2: values.filter(value => value < 1.2).length / values.length * 100,
+      below1_5: values.filter(value => value < 1.5).length / values.length * 100
     },
 
     windows: [6, 12, 24].map(size => {
@@ -712,10 +641,10 @@ function analyze(rows) {
     dataQuality: CACHE.quality,
 
     backtestSummary: {
-      evaluated: backtestResult.totalEvaluatedPositions,
-      holdout: backtestResult.holdoutPositions,
-      productionHoldout: backtestResult.productionHoldout,
-      watchHoldout: backtestResult.watchHoldout
+      evaluated: bt.totalEvaluatedPositions,
+      holdout: bt.holdoutPositions,
+      productionHoldout: bt.productionHoldout,
+      watchHoldout: bt.watchHoldout
     },
 
     features: result.features,
@@ -739,7 +668,7 @@ app.get('/', (_req, res) => {
     ok: true,
     name: 'AVIATOR AI PREDICTOR',
     version: VERSION,
-    csvSource: 'data/' + CSV_NAME,
+    csvSource: `data/${CSV_NAME}`,
     message:
       'Historical research API. Use /api/status, /api/analyze, /api/backtest or /api/history.'
   });
@@ -753,7 +682,7 @@ app.get('/api/status', (_req, res) => {
     name: 'AVIATOR AI PREDICTOR',
     version: VERSION,
     source: CSV_NAME,
-    sourcePath: 'data/' + CSV_NAME,
+    sourcePath: `data/${CSV_NAME}`,
     loadedAt: data.loadedAt,
     rounds: data.rows.length,
     dataQuality: data.quality,
@@ -779,7 +708,7 @@ app.get('/api/backtest', (_req, res) => {
     ok: true,
     version: VERSION,
     source: CSV_NAME,
-    sourcePath: 'data/' + CSV_NAME,
+    sourcePath: `data/${CSV_NAME}`,
     rounds: data.rows.length,
     ...backtest(data.rows)
   });
@@ -806,7 +735,7 @@ app.get('/api/history', (req, res) => {
     ok: true,
     version: VERSION,
     source: CSV_NAME,
-    sourcePath: 'data/' + CSV_NAME,
+    sourcePath: `data/${CSV_NAME}`,
     total: data.rows.length,
     returned: rows.length,
     rows
@@ -820,7 +749,7 @@ app.post('/api/reload', (_req, res) => {
     ok: !data.error,
     version: VERSION,
     source: CSV_NAME,
-    sourcePath: 'data/' + CSV_NAME,
+    sourcePath: `data/${CSV_NAME}`,
     rounds: data.rows.length,
     error: data.error,
     loadedAt: data.loadedAt
@@ -829,7 +758,6 @@ app.post('/api/reload', (_req, res) => {
 
 app.use((err, _req, res, _next) => {
   console.error('Unhandled request error:', err);
-
   res.status(500).json({
     ok: false,
     version: VERSION,
