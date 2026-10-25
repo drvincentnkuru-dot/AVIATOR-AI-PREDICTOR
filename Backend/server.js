@@ -10,7 +10,7 @@ app.disable('x-powered-by');
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const VERSION = 'V1.1.5';
+const VERSION = 'V1.2.0';
 const PORT = Number(process.env.PORT || 10000);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const CSV_NAME = 'aviator-2026-10 (1).csv';
@@ -43,7 +43,6 @@ function normalizeHeader(value) {
     .replace(/^_+|_+$/g, '');
 }
 
-// CSV parser supports quoted commas, escaped quotes, and quoted newlines.
 function parseCsv(text) {
   const source = String(text).replace(/^\uFEFF/, '');
   const records = [];
@@ -117,6 +116,7 @@ function compareRoundIds(a, b) {
   try {
     const x = BigInt(a);
     const y = BigInt(b);
+
     return x < y ? -1 : x > y ? 1 : 0;
   } catch {
     return String(a).localeCompare(String(b));
@@ -126,6 +126,7 @@ function compareRoundIds(a, b) {
 function parseSourceCsv(text) {
   const records = parseCsv(text);
   const headers = records[0].map(normalizeHeader);
+
   const find = aliases => headers.findIndex(h => aliases.includes(h));
 
   const multiplierIndex = find([
@@ -161,11 +162,15 @@ function parseSourceCsv(text) {
   ]);
 
   if (multiplierIndex < 0) {
-    throw new Error('The required CSV has no recognized multiplier column.');
+    throw new Error(
+      'The required CSV has no recognized multiplier column.'
+    );
   }
 
   if (roundIdIndex < 0) {
-    throw new Error('The required CSV has no recognized round ID column.');
+    throw new Error(
+      'The required CSV has no recognized round ID column.'
+    );
   }
 
   const rows = [];
@@ -227,6 +232,7 @@ function parseSourceCsv(text) {
 
   const unique = rows.filter(row => {
     if (seen.has(row.roundId)) return false;
+
     seen.add(row.roundId);
     return true;
   });
@@ -299,7 +305,9 @@ function loadData(force = false) {
       return CACHE;
     }
 
-    const parsed = parseSourceCsv(fs.readFileSync(CSV_FILE, 'utf8'));
+    const parsed = parseSourceCsv(
+      fs.readFileSync(CSV_FILE, 'utf8')
+    );
 
     Object.assign(CACHE, {
       file: CSV_FILE,
@@ -362,12 +370,14 @@ function currentStreak(rows, predicate) {
   return n;
 }
 
-// Historical position scoring uses only observations before the position being tested.
 function scoreAt(rows, endIndex) {
   const history = rows.slice(0, endIndex);
 
   if (history.length < MIN_HISTORY) {
-    return { score: null, features: null };
+    return {
+      score: null,
+      features: null
+    };
   }
 
   const w6 = history.slice(-6);
@@ -379,6 +389,7 @@ function scoreAt(rows, endIndex) {
   const r24 = rateAtLeast(w24);
 
   const latest = history[history.length - 1];
+
   const lowStreak = currentStreak(
     history,
     r => r.multiplier < 1.5
@@ -394,13 +405,8 @@ function scoreAt(rows, endIndex) {
     score -= Math.min(8, (lowStreak - 2) * 2);
   }
 
-  if (latest.multiplier >= 10) {
-    score -= 2;
-  }
-
-  if (latest.multiplier < 1.2) {
-    score += 1;
-  }
+  if (latest.multiplier >= 10) score -= 2;
+  if (latest.multiplier < 1.2) score += 1;
 
   score = Math.max(0, Math.min(100, Math.round(score)));
 
@@ -415,6 +421,143 @@ function scoreAt(rows, endIndex) {
       recentMean: mean(w6.map(r => r.multiplier)),
       latestMultiplier: latest.multiplier
     }
+  };
+}
+
+function multiplierBucket(multiplier) {
+  if (multiplier < 1.5) return 'L';
+  if (multiplier < 2) return 'M';
+  if (multiplier < 3) return 'H';
+  return 'X';
+}
+
+function wilsonInterval(hits, samples, z = 1.96) {
+  if (!samples) {
+    return {
+      lowerPercent: null,
+      upperPercent: null
+    };
+  }
+
+  const p = hits / samples;
+  const z2 = z * z;
+  const d = 1 + z2 / samples;
+  const center = (p + z2 / (2 * samples)) / d;
+
+  const radius =
+    z *
+    Math.sqrt(
+      p * (1 - p) / samples +
+      z2 / (4 * samples * samples)
+    ) / d;
+
+  return {
+    lowerPercent: Math.max(
+      0,
+      (center - radius) * 100
+    ),
+    upperPercent: Math.min(
+      100,
+      (center + radius) * 100
+    )
+  };
+}
+
+// The estimate is always displayed. A signal is separate and requires stronger
+// evidence; this prevents the app from inventing a high probability.
+function estimateNextProbability(rows) {
+  const baselinePercent = rateAtLeast(rows, TARGET_MULTIPLIER);
+  const baseline = (baselinePercent ?? 0) / 100;
+  const priorWeight = 20;
+  const minimumMatches = 30;
+
+  for (
+    let contextLength = 3;
+    contextLength >= 1;
+    contextLength--
+  ) {
+    if (rows.length <= contextLength) continue;
+
+    const currentContext = rows
+      .slice(-contextLength)
+      .map(r => multiplierBucket(r.multiplier))
+      .join('');
+
+    let matchingSamples = 0;
+    let matchingHits = 0;
+
+    for (
+      let i = contextLength;
+      i < rows.length;
+      i++
+    ) {
+      const context = rows
+        .slice(i - contextLength, i)
+        .map(r => multiplierBucket(r.multiplier))
+        .join('');
+
+      if (context !== currentContext) continue;
+
+      matchingSamples++;
+
+      if (rows[i].multiplier >= TARGET_MULTIPLIER) {
+        matchingHits++;
+      }
+    }
+
+    if (matchingSamples < minimumMatches) continue;
+
+    const empiricalPercent =
+      matchingHits / matchingSamples * 100;
+
+    const probabilityPercent =
+      (
+        matchingHits +
+        priorWeight * baseline
+      ) /
+      (matchingSamples + priorWeight) * 100;
+
+    return {
+      targetMultiplier: TARGET_MULTIPLIER,
+      event: 'next multiplier >= target',
+      probabilityPercent,
+      historicalBaselinePercent: baselinePercent,
+      differenceFromBaselinePercentagePoints:
+        probabilityPercent - baselinePercent,
+      contextLength,
+      contextPattern: currentContext,
+      matchingSamples,
+      matchingHits,
+      empiricalPercent,
+      confidenceInterval95:
+        wilsonInterval(matchingHits, matchingSamples),
+      method:
+        'Matched historical sequence frequency, shrunk toward the full-history base rate',
+      note:
+        'Historical estimate only; not a guaranteed or independently verified probability for the next round.'
+    };
+  }
+
+  const hits = rows.filter(
+    r => r.multiplier >= TARGET_MULTIPLIER
+  ).length;
+
+  return {
+    targetMultiplier: TARGET_MULTIPLIER,
+    event: 'next multiplier >= target',
+    probabilityPercent: baselinePercent,
+    historicalBaselinePercent: baselinePercent,
+    differenceFromBaselinePercentagePoints: 0,
+    contextLength: 0,
+    contextPattern: null,
+    matchingSamples: rows.length,
+    matchingHits: hits,
+    empiricalPercent: baselinePercent,
+    confidenceInterval95: wilsonInterval(hits, rows.length),
+    method:
+      'Full-history base-rate fallback because no matching sequence had enough completed examples',
+    note:
+      'Base rate only; no sequence-specific edge was established.'
   };
 }
 
@@ -448,12 +591,15 @@ function evaluateThreshold(evaluations, threshold) {
   ).length;
 
   const misses = selected.length - hits;
+
   const hitRate = selected.length
     ? hits / selected.length * 100
     : null;
 
   const baseline = rateAtLeast(
-    evaluations.map(e => ({ multiplier: e.actualNext })),
+    evaluations.map(e => ({
+      multiplier: e.actualNext
+    })),
     TARGET_MULTIPLIER
   );
 
@@ -471,7 +617,8 @@ function evaluateThreshold(evaluations, threshold) {
     coverage: evaluations.length
       ? selected.length / evaluations.length * 100
       : 0,
-    meetsMinimumSamples: selected.length >= BACKTEST_MIN_SAMPLES,
+    meetsMinimumSamples:
+      selected.length >= BACKTEST_MIN_SAMPLES,
     aboveBaseline:
       hitRate !== null &&
       baseline !== null &&
@@ -487,12 +634,23 @@ function backtest(rows) {
   const development = evaluations.slice(0, split);
   const holdout = evaluations.slice(split);
 
-  const diagnostics = DIAGNOSTIC_THRESHOLDS.map(threshold => ({
-    threshold,
-    development: evaluateThreshold(development, threshold),
-    holdout: evaluateThreshold(holdout, threshold),
-    overall: evaluateThreshold(evaluations, threshold)
-  }));
+  const diagnostics = DIAGNOSTIC_THRESHOLDS.map(
+    threshold => ({
+      threshold,
+      development: evaluateThreshold(
+        development,
+        threshold
+      ),
+      holdout: evaluateThreshold(
+        holdout,
+        threshold
+      ),
+      overall: evaluateThreshold(
+        evaluations,
+        threshold
+      )
+    })
+  );
 
   const productionHoldout = evaluateThreshold(
     holdout,
@@ -523,7 +681,8 @@ function backtest(rows) {
       average: mean(scores),
       countAtLeast72: scores.filter(s => s >= 72).length
     },
-    note: 'Walk-forward historical diagnostics only. Holdout results are descriptive, not proof of future performance. No guarantee of the next multiplier.'
+    note:
+      'Walk-forward historical diagnostics only. These thresholds test the evidence score, not the matched-sequence probability estimator. No result guarantees the next multiplier.'
   };
 }
 
@@ -555,14 +714,30 @@ function analyze(rows) {
     q.duplicateRoundIds === 0
   );
 
-  const samplePass = prod.meetsMinimumSamples;
-  const baselinePass = prod.aboveBaseline;
+  const probabilityEstimate = estimateNextProbability(rows);
+  const baseline =
+    probabilityEstimate.historicalBaselinePercent;
+  const estimate =
+    probabilityEstimate.probabilityPercent;
+  const lower =
+    probabilityEstimate.confidenceInterval95.lowerPercent;
 
-  const sharedEvidencePass =
-    enoughHistory &&
-    dataQualityPass &&
-    samplePass &&
-    baselinePass;
+  const enoughMatches =
+    probabilityEstimate.contextLength > 0 &&
+    probabilityEstimate.matchingSamples >= 30;
+
+  const clearEdge =
+    enoughMatches &&
+    probabilityEstimate.matchingSamples >= 50 &&
+    estimate >= baseline + 5 &&
+    lower !== null &&
+    lower > baseline;
+
+  const possibleEdge =
+    enoughMatches &&
+    estimate >= baseline + 2 &&
+    lower !== null &&
+    lower >= baseline - 3;
 
   let action = 'NO SIGNAL';
   const reasons = [];
@@ -575,74 +750,61 @@ function analyze(rows) {
 
   if (!dataQualityPass) {
     reasons.push(
-      'CSV quality gate failed. Signals are blocked until the required source passes validation.'
+      'CSV quality gate failed. No signal is permitted until the required large CSV passes validation.'
     );
-  }
-
-  if (!samplePass) {
-    reasons.push(
-      `Production-threshold holdout has ${prod.samples} samples; at least ${BACKTEST_MIN_SAMPLES} are required.`
-    );
-  }
-
-  if (!baselinePass) {
-    reasons.push(
-      'The production-threshold holdout hit rate does not exceed its historical baseline.'
-    );
-  }
-
-  if (
-    sharedEvidencePass &&
-    scored.score !== null &&
-    scored.score >= SIGNAL_THRESHOLD
-  ) {
+  } else if (clearEdge) {
     action = 'SIGNAL';
+
     reasons.push(
-      'Configured evidence gates passed. This remains a historical research signal, not a guarantee.'
+      'The matched-sequence estimate exceeds baseline and its 95% lower bound is above baseline. This is not a guarantee.'
     );
-  } else if (
-    sharedEvidencePass &&
-    scored.score !== null &&
-    scored.score >= WATCH_THRESHOLD
-  ) {
+  } else if (possibleEdge) {
     action = 'WATCH';
+
     reasons.push(
-      'Evidence gates passed, but the current score is below the signal threshold. WATCH is monitoring-only, not a betting instruction.'
+      'The matched-sequence estimate is above baseline, but evidence is not strong enough for SIGNAL. Monitoring only.'
     );
   } else {
-    if (scored.score !== null && scored.score < WATCH_THRESHOLD) {
-      reasons.push(
-        'Current evidence score is below the watch threshold.'
-      );
-    }
-
     reasons.push(
-      'One or more required evidence gates failed; issuing NO SIGNAL.'
+      `Matched-sequence estimate is ${estimate.toFixed(2)}% versus a ${baseline.toFixed(2)}% historical baseline; a reliable positive edge was not established.`
+    );
+  }
+
+  if (!enoughMatches) {
+    reasons.push(
+      'No matching sequence had at least 30 completed historical examples; the estimate falls back to the full-history base rate.'
+    );
+  } else {
+    reasons.push(
+      `Estimate uses ${probabilityEstimate.matchingSamples} completed matches of the latest ${probabilityEstimate.contextLength}-round pattern.`
     );
   }
 
   const evidenceStatus =
-    sharedEvidencePass &&
-    scored.score !== null &&
-    scored.score >= SIGNAL_THRESHOLD
+    action === 'SIGNAL'
       ? 'QUALIFIED EVIDENCE'
-      : sharedEvidencePass &&
-        scored.score !== null &&
-        scored.score >= WATCH_THRESHOLD
+      : action === 'WATCH'
         ? 'MODERATE EVIDENCE'
         : 'LOW / INSUFFICIENT EVIDENCE';
 
-  // Always return a research target when analysis succeeds.
-  // This is not a claim that the next round will reach the target.
   const nextRoundSignal = {
-    action: 'RESEARCH TARGET',
+    action,
     targetMultiplier: TARGET_MULTIPLIER,
     evidenceStatus,
     evidenceScore: scored.score,
+    probabilityPercent:
+      probabilityEstimate.probabilityPercent,
+    historicalBaselinePercent:
+      probabilityEstimate.historicalBaselinePercent,
+    matchingSamples:
+      probabilityEstimate.matchingSamples,
+    contextLength:
+      probabilityEstimate.contextLength,
     referenceRoundId: latest.roundId,
     referenceMultiplier: latest.multiplier,
     generatedAt: new Date().toISOString(),
-    note: 'This is a target for research on the next round, not a claim that the next round will reach this multiplier.'
+    note:
+      'Historical sequence estimate for research only; it does not guarantee the next round will reach the target.'
   };
 
   return {
@@ -668,11 +830,16 @@ function analyze(rows) {
       : null,
 
     nextRoundSignal,
+    probabilityEstimate,
 
     signal: {
       action,
       score: scored.score,
       targetMultiplier: TARGET_MULTIPLIER,
+      probabilityPercent:
+        probabilityEstimate.probabilityPercent,
+      probabilityLabel:
+        'Historical estimate of P(next multiplier >= 2.00x)',
       confidence: null,
       confidenceLabel: 'Evidence score, not win probability',
       reasons
@@ -688,8 +855,12 @@ function analyze(rows) {
       atLeast3: rateAtLeast(rows, 3),
       atLeast5: rateAtLeast(rows, 5),
       atLeast10: rateAtLeast(rows, 10),
-      below1_2: values.filter(v => v < 1.2).length / values.length * 100,
-      below1_5: values.filter(v => v < 1.5).length / values.length * 100
+      below1_2:
+        values.filter(v => v < 1.2).length /
+        values.length * 100,
+      below1_5:
+        values.filter(v => v < 1.5).length /
+        values.length * 100
     },
 
     windows: [6, 12, 24].map(size => {
@@ -708,17 +879,20 @@ function analyze(rows) {
       {
         name: 'Minimum history',
         passed: enoughHistory,
-        detail: `${rows.length} rounds; minimum ${MIN_HISTORY}`
+        detail:
+          `${rows.length} rounds; minimum ${MIN_HISTORY}`
       },
       {
         name: 'Holdout backtest sample count',
-        passed: samplePass,
-        detail: `${prod.samples} selected holdout signals; minimum ${BACKTEST_MIN_SAMPLES}`
+        passed: prod.meetsMinimumSamples,
+        detail:
+          `${prod.samples} selected holdout signals; minimum ${BACKTEST_MIN_SAMPLES}`
       },
       {
         name: 'Holdout above baseline',
-        passed: baselinePass,
-        detail: `${prod.hitRate === null ? 'n/a' : prod.hitRate.toFixed(2) + '%'} hit rate vs ${prod.baselineHitRate === null ? 'n/a' : prod.baselineHitRate.toFixed(2) + '%'} baseline`
+        passed: prod.aboveBaseline,
+        detail:
+          `${prod.hitRate === null ? 'n/a' : prod.hitRate.toFixed(2) + '%'} hit rate vs ${prod.baselineHitRate === null ? 'n/a' : prod.baselineHitRate.toFixed(2) + '%'} baseline`
       },
       {
         name: 'Large CSV data quality',
@@ -740,7 +914,8 @@ function analyze(rows) {
 
     features: scored.features,
 
-    disclaimer: 'Historical evidence and walk-forward analysis only. No guaranteed next multiplier. Aviator outcomes may be random. Use for research only.'
+    disclaimer:
+      'Historical evidence and walk-forward analysis only. The displayed percentage is an estimate from past sequences, not a guaranteed next-round probability. No guaranteed next multiplier. Use for research only.'
   };
 }
 
@@ -750,24 +925,27 @@ function apiError(res, data) {
     version: VERSION,
     source: CSV_NAME,
     sourcePath: `data/${CSV_NAME}`,
-    error: data.error || 'Required large CSV could not be loaded.'
+    error:
+      data.error ||
+      'Required large CSV could not be loaded.'
   });
 }
 
 app.get('/', (_req, res) => {
-  res.json({
+  return res.json({
     ok: true,
     name: 'AVIATOR AI PREDICTOR',
     version: VERSION,
     csvSource: `data/${CSV_NAME}`,
-    message: 'Historical research API. Use /api/status, /api/analyze, /api/backtest or /api/history.'
+    message:
+      'Historical research API. Use /api/status, /api/analyze, /api/backtest or /api/history.'
   });
 });
 
 app.get('/api/status', (_req, res) => {
   const d = loadData();
 
-  res.status(d.error ? 503 : 200).json({
+  return res.status(d.error ? 503 : 200).json({
     ok: !d.error,
     name: 'AVIATOR AI PREDICTOR',
     version: VERSION,
@@ -809,55 +987,46 @@ app.get('/api/history', (req, res) => {
 
   if (d.error) return apiError(res, d);
 
-  const requested = Number.parseInt(req.query.limit, 10) || 100;
-  const limit = Math.max(
-    1,
-    Math.min(MAX_HISTORY_RESPONSE, requested)
-  );
+  const requested = Number.parseInt(req.query.limit, 10);
 
-  const rows = d.rows.slice(-limit).map(r => ({
-    roundId: r.roundId,
-    time: r.time,
-    multiplier: r.multiplier
-  }));
+  const limit = Number.isFinite(requested)
+    ? Math.max(1, Math.min(MAX_HISTORY_RESPONSE, requested))
+    : 50;
 
   return res.json({
     ok: true,
     version: VERSION,
     source: CSV_NAME,
     sourcePath: `data/${CSV_NAME}`,
-    total: d.rows.length,
-    returned: rows.length,
-    rows
+    rounds: d.rows.length,
+    limit,
+    rows: d.rows.slice(-limit).map(r => ({
+      roundId: r.roundId,
+      time: r.time,
+      multiplier: r.multiplier
+    }))
   });
 });
 
 app.post('/api/reload', (_req, res) => {
   const d = loadData(true);
 
-  return res.status(d.error ? 503 : 200).json({
-    ok: !d.error,
+  if (d.error) return apiError(res, d);
+
+  return res.json({
+    ok: true,
     version: VERSION,
     source: CSV_NAME,
     sourcePath: `data/${CSV_NAME}`,
     rounds: d.rows.length,
-    error: d.error,
-    loadedAt: d.loadedAt
-  });
-});
-
-app.use((err, _req, res, _next) => {
-  console.error('Unhandled request error:', err);
-
-  return res.status(500).json({
-    ok: false,
-    version: VERSION,
-    error: 'Internal server error.'
+    loadedAt: d.loadedAt,
+    dataQuality: d.quality
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`AVIATOR AI PREDICTOR ${VERSION} listening on port ${PORT}`);
+  console.log(
+    `AVIATOR AI PREDICTOR ${VERSION} listening on port ${PORT}`
+  );
   console.log(`Required CSV: ${CSV_FILE}`);
-  console.log('CSV fallback is disabled.');
 });
