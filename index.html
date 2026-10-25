@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0b1220">
-  <meta name="description" content="AVIATOR AI PREDICTOR historical CSV analysis and walk-forward backtesting.">
-  <title>AVIATOR AI PREDICTOR V1.1.5</title>
+  <meta name="description" content="AVIATOR AI PREDICTOR historical CSV sequence analysis and walk-forward backtesting.">
+  <title>AVIATOR AI PREDICTOR V1.2.0</title>
   <link rel="stylesheet" href="style.css">
   <script defer src="script.js"></script>
 </head>
@@ -15,35 +15,58 @@
       <div>
         <p class="eyebrow">HISTORICAL RESEARCH TOOL</p>
         <h1>AVIATOR <span>AI PREDICTOR</span></h1>
-        <p class="subtitle">V1.1.5 · Collect → Analyze → Backtest → Score → Signal</p>
+        <p class="subtitle">V1.2.0 · Collect → Analyze → Backtest → Score → Signal</p>
       </div>
-      <div class="api-pill"><span id="statusDot" class="status-dot"></span><span id="apiStatus">Checking API…</span></div>
+      <div class="api-pill">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="apiStatus">Checking API…</span>
+      </div>
     </header>
 
     <div id="errorBox" class="error-box" role="alert" hidden></div>
 
     <section class="hero panel">
       <div class="section-head">
-        <div><p class="eyebrow">CURRENT EVIDENCE REVIEW</p><h2>Research status</h2></div>
+        <div>
+          <p class="eyebrow">CURRENT EVIDENCE REVIEW</p>
+          <h2>Next-round research estimate</h2>
+        </div>
         <button id="analyzeBtn" class="primary-btn" type="button">Analyze history</button>
       </div>
+
       <div class="signal-layout">
         <div class="signal-card">
-          <p class="muted">Next round research signal</p>
-          <div id="signalAction" class="action-label watch">TARGET 2.00x</div>
+          <p class="muted">Evidence-gated decision</p>
+          <div id="signalAction" class="action-label no-signal">NO SIGNAL</div>
           <p class="small">Evidence status: <strong id="evidenceStatus">Waiting for analysis…</strong></p>
-          <p class="small">Evidence-gated decision: <strong id="evidenceDecision">Waiting…</strong></p>
-          <div class="score-line"><span id="signalScore" class="score">—</span><span class="muted">/ 100 evidence score</span></div>
+          <div class="score-line">
+            <span id="signalScore" class="score">—</span>
+            <span class="muted">/ 100 evidence score (not probability)</span>
+          </div>
+
+          <div class="probability-box">
+            <p class="small muted">Historical estimate for next round ≥ 2.00x</p>
+            <div class="probability-line">
+              <strong id="probabilityValue">—</strong>
+              <span id="probabilityVsBaseline" class="small muted">Baseline: —</span>
+            </div>
+            <p id="probabilityDetails" class="small muted">Waiting for matched-sequence analysis…</p>
+          </div>
+
           <p>Target under review: <strong id="signalTarget">2.00x</strong></p>
-          <p id="nextSignalNote" class="small muted">A research target is not a guaranteed outcome.</p>
+          <p id="nextSignalNote" class="small muted">Historical estimate only; no guaranteed next multiplier.</p>
           <p id="confidenceLabel" class="small muted">Evidence score, not win probability</p>
         </div>
+
         <div class="signal-details">
           <h3>Why this status?</h3>
-          <ul id="signalReasons"><li>Waiting for API data…</li></ul>
-          <p class="small muted">A score is not a probability or a guarantee of the next multiplier.</p>
+          <ul id="signalReasons">
+            <li>Waiting for API data…</li>
+          </ul>
+          <p class="small muted">The displayed percentage is estimated from similar completed historical sequences. It is not a guarantee and may not predict independent random outcomes.</p>
         </div>
       </div>
+
       <div class="meta-grid">
         <div><span class="muted">CSV source</span><strong id="sourceName">—</strong></div>
         <div><span class="muted">Valid rounds</span><strong id="roundCount">—</strong></div>
@@ -53,7 +76,13 @@
     </section>
 
     <section class="panel">
-      <div class="section-head"><div><p class="eyebrow">DATA OVERVIEW</p><h2>Historical distribution</h2></div></div>
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">DATA OVERVIEW</p>
+          <h2>Historical distribution</h2>
+        </div>
+      </div>
+
       <div class="stat-grid">
         <div class="stat"><span>Mean</span><strong id="meanValue">—</strong></div>
         <div class="stat"><span>Median</span><strong id="medianValue">—</strong></div>
@@ -62,12 +91,29 @@
         <div class="stat"><span>Rounds ≥ 2x</span><strong id="atLeast2">—</strong></div>
         <div class="stat"><span>Rounds ≥ 10x</span><strong id="atLeast10">—</strong></div>
       </div>
-      <div class="table-wrap"><table><thead><tr><th>Window</th><th>Samples</th><th>Mean</th><th>≥ 2x</th><th>≥ 3x</th></tr></thead><tbody id="windowsBody"><tr><td colspan="5">Waiting for data…</td></tr></tbody></table></div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Window</th><th>Samples</th><th>Mean</th><th>≥ 2x</th><th>≥ 3x</th></tr>
+          </thead>
+          <tbody id="windowsBody">
+            <tr><td colspan="5">Waiting for data…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="panel">
-      <div class="section-head"><div><p class="eyebrow">CHRONOLOGICAL WALK-FORWARD</p><h2>Backtest evidence</h2></div></div>
-      <p class="small muted">Each historical position is scored using only earlier rounds. The final 30% of positions are held out chronologically. Results describe historical performance only and do not prove future performance.</p>
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">CHRONOLOGICAL WALK-FORWARD</p>
+          <h2>Evidence-score backtest</h2>
+        </div>
+      </div>
+
+      <p class="small muted">The existing score-threshold backtest is diagnostic only. It is not the same as validating the new matched-sequence percentage. Historical results do not prove future performance.</p>
+
       <div class="stat-grid">
         <div class="stat"><span>Target</span><strong id="backtestTarget">2.00x</strong></div>
         <div class="stat"><span>Evaluated positions</span><strong id="testedPositions">—</strong></div>
@@ -77,30 +123,74 @@
         <div class="stat"><span>Baseline rate</span><strong id="btBaseline">—</strong></div>
         <div class="stat"><span>Coverage</span><strong id="btCoverage">—</strong></div>
       </div>
+
       <p id="backtestNote" class="small muted">Loading backtest…</p>
-      <div class="table-wrap"><table><thead><tr><th>Threshold</th><th>Dev samples</th><th>Dev hit rate</th><th>Holdout samples</th><th>Holdout hit rate</th><th>Holdout baseline</th><th>Coverage</th></tr></thead><tbody id="backtestBody"><tr><td colspan="7">Waiting for data…</td></tr></tbody></table></div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Threshold</th><th>Dev samples</th><th>Dev hit rate</th>
+              <th>Holdout samples</th><th>Holdout hit rate</th>
+              <th>Holdout baseline</th><th>Coverage</th>
+            </tr>
+          </thead>
+          <tbody id="backtestBody">
+            <tr><td colspan="7">Waiting for data…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="panel">
-      <div class="section-head"><div><p class="eyebrow">QUALITY CONTROL</p><h2>Data quality and evidence gates</h2></div><strong id="qualityStatus" class="quality-badge">Checking…</strong></div>
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">QUALITY CONTROL</p>
+          <h2>Data quality and evidence gates</h2>
+        </div>
+        <strong id="qualityStatus" class="quality-badge">Checking…</strong>
+      </div>
+
       <p class="small muted">Required source: data/aviator-2026-10 (1).csv. The backend must not silently switch to another CSV.</p>
+
       <div class="stat-grid">
         <div class="stat"><span>Source data rows</span><strong id="sourceDataRows">—</strong></div>
         <div class="stat"><span>Invalid rows</span><strong id="invalidRows">—</strong></div>
         <div class="stat"><span>Duplicate IDs</span><strong id="duplicateIds">—</strong></div>
         <div class="stat"><span>Missing timestamps</span><strong id="missingTimes">—</strong></div>
       </div>
+
       <p id="columnInfo" class="small muted">Columns: —</p>
       <ul id="qualityWarnings" class="warning-list"></ul>
-      <div id="evidenceGates" class="gates"><p class="muted">Waiting for gate results…</p></div>
+      <div id="evidenceGates" class="gates">
+        <p class="muted">Waiting for gate results…</p>
+      </div>
     </section>
 
     <section class="panel">
-      <div class="section-head"><div><p class="eyebrow">RECENT SOURCE ROWS</p><h2>Round history</h2></div></div>
-      <div class="table-wrap"><table><thead><tr><th>Round ID</th><th>Timestamp</th><th>Multiplier</th></tr></thead><tbody id="roundsBody"><tr><td colspan="3">Loading…</td></tr></tbody></table></div>
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">RECENT SOURCE ROWS</p>
+          <h2>Round history</h2>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Round ID</th><th>Timestamp</th><th>Multiplier</th></tr>
+          </thead>
+          <tbody id="roundsBody">
+            <tr><td colspan="3">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
-    <footer><p><strong>Important disclaimer:</strong> Historical evidence and walk-forward analysis only. No guaranteed next multiplier. Aviator outcomes may be random; this tool cannot know or guarantee the next result. Use for research only.</p><p class="small muted">AVIATOR AI PREDICTOR V1.1.5 · Uses the CSV source shown above. No live game feed is connected.</p></footer>
+    <footer>
+      <p><strong>Important disclaimer:</strong> The displayed percentage is a historical sequence estimate, not a guaranteed probability of the next round. No guaranteed next multiplier. Aviator outcomes may be random. Use for research only.</p>
+      <p class="small muted">AVIATOR AI PREDICTOR V1.2.0 · Uses the CSV source shown above. No live game feed is connected.</p>
+    </footer>
   </main>
 </body>
 </html>
